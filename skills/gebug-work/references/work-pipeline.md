@@ -1,0 +1,659 @@
+# gebug-work pipeline
+
+Phase-by-phase execution reference for `/gebug-work`. The SKILL.md is
+authoritative for safety and doctrine. This file is authoritative for
+execution.
+
+EVM-only. Solidity / Vyper. Mainnet fork only for PoC validation; never
+live broadcast.
+
+## Conventions
+
+- Capture once at start:
+  ```bash
+  AUDIT_DATE=$(date -u +%F)
+  AUDIT_DIR="<target-repo>/docs/gebug-audit"
+  DEFINITION_DIR="$AUDIT_DIR/definition"
+  FINDING_DIR="$AUDIT_DIR/finding"
+  FUZZING_DIR="$AUDIT_DIR/fuzzing"
+  EXPLOIT_DIR="$AUDIT_DIR/exploit"
+  REPORT_DIR="$AUDIT_DIR/report"
+  POC_DIR="$REPORT_DIR/POC"
+  mkdir -p "$FINDING_DIR" "$FUZZING_DIR" "$EXPLOIT_DIR" "$REPORT_DIR" "$POC_DIR"
+  ```
+- All four definition files MUST exist before any other phase runs.
+- All Foundry PoCs land in `$POC_DIR/<finding-slug>/Exploit.t.sol` with a
+  sibling `reproduce.sh`.
+- Headline exploit lives at `$EXPLOIT_DIR/Exploit.sol`.
+- Use a mainnet fork for ALL exploit validation; never test on real
+  mainnet.
+- Use `vm.deal()` for attacker funding (simulated, zero risk).
+- Pin block numbers for reproducibility.
+- FORMATTING: NEVER use an em dash. Use a regular hyphen.
+
+## Slug derivation
+
+A slug is lowercase, kebab-case, derived from the finding title plus the
+attack class. Example: title "First-supplier hToken inflation drains
+new depositors" → slug `first-supplier-htoken-inflation`.
+
+Slugs must be unique within an audit. If two findings collide, append a
+short hash of the contract path: `first-supplier-htoken-inflation-vault`.
+
+## PHASE -1: Full toolchain pre-flight
+
+```bash
+command -v forge   >/dev/null || echo "MISSING: forge (Foundry)"
+command -v cast    >/dev/null || echo "MISSING: cast (Foundry)"
+command -v anvil   >/dev/null || echo "MISSING: anvil (Foundry)"
+command -v slither >/dev/null || echo "MISSING: slither (pip install slither-analyzer)"
+command -v aderyn  >/dev/null || echo "OPTIONAL: aderyn (cargo install aderyn)"
+command -v echidna >/dev/null || echo "OPTIONAL: echidna - property fuzzing"
+command -v medusa  >/dev/null || echo "OPTIONAL: medusa - Crytic Go fuzzer"
+command -v halmos  >/dev/null || echo "OPTIONAL: halmos (pipx install halmos)"
+```
+
+If `forge`, `cast`, `anvil`, or `slither` are missing, STOP and tell the
+user to install them. Do not silently skip a phase.
+
+## PHASE 0: Re-validate definition inputs
+
+```bash
+for f in DEFINITION.md CANDIDATES.md SAFETY_PREFLIGHT.md BOUNTY_MATRIX.md; do
+  test -f "$DEFINITION_DIR/$f" || { echo "MISSING: $f"; exit 1; }
+done
+```
+
+If any is missing, refuse to start and tell the user to run
+`/gebug-brainstorm`.
+
+Read `DEFINITION.md` header. If `source_commit` differs from
+`git -C <target-repo> rev-parse HEAD`, ask the user whether to:
+
+- (a) rebrainstorm first,
+- (b) run in DIFF-FOCUSED mode against changed files only (prioritize
+      vuln-hunter coverage on the changed files and any function whose
+      call-graph touches them; note previously-cleared areas so you do
+      not re-spend the full budget on unchanged code), or
+- (c) continue anyway.
+
+Read the list of attack-vector docs from `DEFINITION.md` under
+"Attack-vector docs to load". Verify each exists in
+`<this-skill>/references/attack-vectors/`. If any is missing, name it
+and stop.
+
+## PHASE 1: Static analysis
+
+```bash
+slither <target-repo> --print human-summary 2>&1 \
+  | tee "$REPORT_DIR/slither-summary.txt"
+
+slither <target-repo> \
+  --detect reentrancy-eth,reentrancy-no-eth,reentrancy-benign,reentrancy-events,reentrancy-unlimited-gas,uninitialized-state,uninitialized-storage,arbitrary-send-erc20,arbitrary-send-eth,unchecked-transfer,unprotected-upgrade,suicidal,delegatecall-loop,controlled-delegatecall,events-access,events-maths,incorrect-equality,locked-ether,unused-return,weak-prng,divide-before-multiply,incorrect-shift,tx-origin \
+  2>&1 | tee "$REPORT_DIR/slither-high-impact.txt"
+```
+
+If Slither fails on dependencies:
+
+```bash
+slither <target-repo> --solc-remaps "@openzeppelin=lib/openzeppelin-contracts" ...
+```
+
+Second-engine pass when available:
+
+```bash
+aderyn <target-repo> -o "$REPORT_DIR/aderyn-report.md"
+```
+
+Cross-reference detector findings against `CANDIDATES.md`. New patterns
+flagged by Slither / Aderyn that are NOT in `CANDIDATES.md` should be
+appended as new candidates.
+
+## PHASE 2: Fuzzing, invariants, and symbolic analysis
+
+**Mandatory trigger** - Phase 2 cannot be skipped if ANY of:
+
+- Contract has arithmetic beyond plain ERC20 transfer (multiply, divide,
+  share math, rate math, fee math, slashing math).
+- Contract is a vault, AMM, lending market, staking adapter, LST, LRT,
+  bonding curve, oracle, or restaking integration.
+- Contract has a state machine with ≥ 3 distinct phases.
+- `BOUNTY_MATRIX.md`'s Critical lines include "conversion rate
+  manipulation", "share inflation", "fund accounting", or any
+  quantitative bound.
+
+If the trigger applies and Phase 2 is skipped, the audit is INCOMPLETE.
+`REPORT.md` must state explicitly which fuzzing was attempted and what
+was found (even if no counterexample).
+
+### Foundry invariant / fuzz
+
+```solidity
+// $FUZZING_DIR/{slug}_Invariant.t.sol
+contract ProtocolInvariant is Test {
+    Target target;
+    function setUp() public {
+        vm.createSelectFork("mainnet", BLOCK);
+        target = Target(TARGET_ADDR);
+        targetContract(address(target));
+    }
+    function invariant_totalSupplyEqualsSumBalances() public view { ... }
+    function invariant_shareValueMonotone() public view { ... }
+    function invariant_noFreeMoney() public view { ... }
+}
+```
+
+Run: `forge test --fuzz-runs 50000 --match-contract Invariant`.
+
+A broken invariant is a Phase 3 lead. Save counterexamples to
+`$FUZZING_DIR/{invariant_name}.counterexample`.
+
+### Echidna / Medusa
+
+```yaml
+# $FUZZING_DIR/echidna.yaml
+testMode: "assertion"
+testLimit: 100000
+seqLen: 100
+deployer: "0x10000"
+sender: ["0x10000", "0x20000", "0x30000"]
+```
+
+Run: `echidna <target-repo>/contracts/Target.sol --config $FUZZING_DIR/echidna.yaml`.
+
+### Halmos symbolic execution
+
+```bash
+halmos --contract Target --function {functionName} --solver-timeout-assertion 30000
+```
+
+Halmos is MANDATORY for: rate / share computation, fee accounting,
+liquidation threshold math, signature recovery, ECDSA, BLS verification,
+proof verification, slashing math.
+
+If halmos hangs or finds counterexamples, save to
+`$FUZZING_DIR/halmos_{function}.out`.
+
+### Invariant catalog by contract type
+
+| Contract type | Invariants to assert |
+|---|---|
+| ERC20 / LST | `totalSupply == sum(balances)`, `transfer(a,b,x); transfer(b,a,x);` net zero |
+| ERC4626 vault | `convertToShares(convertToAssets(x)) <= x`, share value monotone, `totalAssets >= totalSupply * minSharePrice` |
+| LRT / restaking | rate monotone (modulo slashing), `totalShares <= sum(stakerShares)`, withdrawal queue conservation |
+| Lending | `totalBorrow * IRM(util) <= totalSupply * IRM`, LTV always < liquidation threshold |
+| AMM | `k = x*y` constant (or x^(1-w)*y^w for weighted), no extractable value via add-remove liquidity cycle |
+| Oracle consumer | `read_consecutive(N).delta < HEARTBEAT_TOLERANCE` |
+| Bridge | sum-in == sum-out across chains |
+
+Write `$REPORT_DIR/INVARIANTS.md` listing every invariant asserted, the
+status (passing / broken with counterexample / not yet checked), and the
+harness file path.
+
+Write `$FUZZING_DIR/FUZZING.md`:
+
+```markdown
+# Fuzzing summary
+
+| Harness | Tool | Runs | Status | Counterexample |
+|---------|------|------|--------|----------------|
+| Vault_Invariant.t.sol | foundry | 50000 | PASS | - |
+| echidna.yaml | echidna | 100000 | PASS | - |
+| halmos rate() | halmos | timeout 30s | found | halmos_rate.out |
+
+## Notes
+
+Per-harness commentary. What each tested, what was learned, follow-ups.
+```
+
+## PHASE 3: Reconnaissance (re-read with adversarial eyes)
+
+`/gebug-brainstorm` already did light recon. Re-read with the adversarial
+stance:
+
+- Read every NatSpec comment with skepticism. Words like "safely",
+  "should never", "trusted" mark places to attack.
+- For each external integration, read the integrated contract's source
+  too (not just the interface). Trust boundaries are the highest-value
+  attack surface.
+- For each proxy, read the implementation and ALL prior implementations
+  (via Etherscan).
+- For each role, list every function it can call and the worst outcome
+  per call.
+
+Add anything new to `CANDIDATES.md` as a new `HYPOTHESIS_*` candidate.
+
+## PHASE 4: Parallel deep analysis
+
+### 4a. Subsystem split
+
+For each in-scope contract, decide the subsystem split:
+
+| Contract LoC | Min agents | Recommended allocation |
+|---|---|---|
+| ≤ 200 | 1 | single agent covers the whole file |
+| 201 – 500 | 2 – 3 | split by subsystem (admin / user / view) |
+| 501 – 1000 | 4 – 5 | split by subsystem |
+| > 1000 | one agent per natural subsystem | each gets ≤ 300 LoC focus |
+
+Subsystem identification heuristics:
+
+- Functions sharing a state machine (delegate / undelegate / queue /
+  complete).
+- Functions sharing a storage cluster (mappings, structs).
+- Functions sharing a role gate.
+- Functions sharing an external contract dependency.
+- View functions stand alone (or attach to their writers).
+
+### 4b. Token-budget gate
+
+If total proposed agent count > 10, STOP. Show the user:
+
+- Total in-scope LoC.
+- Proposed agent count.
+- Per-agent subsystem list.
+
+Ask for approval, scope narrowing, or split into multiple runs. Do not
+spawn until the user approves.
+
+### 4c. Spawn vuln-hunter agents
+
+Spawn in parallel via the `Agent` tool. The agent definition lives at
+`<this-skill>/agents/vuln-hunter.md`. Pass it via `subagent_type` if your
+agent registry has it; otherwise inline the prompt from that file.
+
+Each agent receives:
+
+- Absolute path to the contract source file(s) and subsystem assignment
+  (function list).
+- `DEFINITION.md`, `INVARIANTS.md` (from Phase 2), and relevant
+  candidates from `CANDIDATES.md`.
+- On-chain addresses.
+- Names of `attack-vector` docs to load. Defaults from the Phase 6 map in
+  `brainstorm-pipeline.md`.
+- Known issues to skip (from `DEFINITION.md` prior audits section).
+- Relevant Slither / Aderyn findings on the agent's subsystem.
+- The verbatim in-scope contract list and `BOUNTY_MATRIX.md`.
+
+**STRICT IN-SCOPE FILTER**: only analyze contracts EXPLICITLY listed in
+`DEFINITION.md` "In-scope contracts" table. BOUNDARY exploration is
+allowed (how does the in-scope contract trust an out-of-scope one?), but
+findings ship only against in-scope contracts.
+
+Wait for all agents to complete. Collect the union of candidates, do NOT
+pre-dedup (Phase 6 dedups). Two agents finding the same candidate
+independently is a confidence boost.
+
+### 4d. Anti-dismissal
+
+If all spawned agents return "no candidates", re-spawn at least one with
+stricter framing quoting the rejection-only-with-proof rule from
+`agents/vuln-hunter.md`. Unanimous "no findings" is a signal the agent
+prompts are biased; fix that, do not accept it as the audit result.
+
+## PHASE 5: Cross-contract analysis
+
+Address each explicitly:
+
+### 5a. Trust boundary inventory
+
+For every external call, answer:
+
+- Who is the callee? Address pinned in source, or settable by an admin?
+- What happens if the callee returns malicious data (revert, reentry,
+  unexpected return value, gas exhaustion)?
+- What happens if the callee is upgraded? (Most EigenLayer / Aave /
+  Chainlink contracts are upgradable behind a proxy.)
+
+### 5b. Shared storage / accounting consistency
+
+For every contract pair that updates a shared accounting variable
+(e.g., totalShares, totalAssets across vault + adapter), prove that no
+sequence of legitimate calls can desynchronize them. Counter-example
+goes to PoC.
+
+### 5c. Upgrade-path race
+
+For each upgradable contract:
+
+- Who can upgrade?
+- Is there a timelock? How long?
+- Does the upgrade preserve storage layout? (Run `forge inspect <contract>
+  storage-layout` against old and new implementations if both are
+  available.)
+- What user state could be invalidated by the upgrade?
+
+### 5d. MEV / ordering
+
+For every state-changing call that depends on external state:
+
+- Can an MEV bot sandwich it (front + back run)?
+- Is the call value-bearing (oracle update, liquidation, deposit at a
+  rate that drifts)?
+
+### 5e. Reentrancy across contracts
+
+The CEI pattern protects a single contract. Across contracts, the call
+graph A → B → C → A is reentrant even if every contract uses CEI
+internally. Trace every external call.
+
+Add findings from 5a-5e to the candidate pool as new
+`HYPOTHESIS_*` entries.
+
+## PHASE 6: Compile candidates (rejection-only-with-proof)
+
+Collect candidates from: `CANDIDATES.md`, Slither, Aderyn, fuzzing,
+vuln-hunter agents, cross-contract analysis. Deduplicate (same root
+cause = one candidate).
+
+**PoC is the falsifier, NOT this phase.** Candidates with
+`recommended_for_poc = yes` flow to Phase 7. This phase only applies
+rejections that meet the rejection-only-with-proof rule:
+
+1. Code-path falsifier with `file:line` of the blocking check.
+2. Math falsifier with symbol-by-symbol derivation.
+3. State falsifier with on-chain `cast` read at the audit fork block.
+4. Bounty falsifier quoting exclusion language from `BOUNTY_MATRIX.md`.
+
+Doubts are NOT rejections. Record doubts in each candidate's
+`single_strongest_doubt` field and let PoC empirically falsify.
+
+### Strict in-scope filter (carefully, not aggressively)
+
+- Contract / target NOT in `DEFINITION.md` in-scope list → write NO
+  findings for it, not even "out-of-scope". Skip entirely.
+- Out-of-scope vuln classes per `BOUNTY_MATRIX.md` → EXCLUDE.
+- Undeployed contracts → LOW at most unless the bounty includes
+  undeployed code.
+- "Best practices", "defense-in-depth", "documentation mismatch" →
+  generally OUT unless they directly cause fund loss. NatSpec / doc
+  mismatch is NOT a vuln.
+- "Temporarily blocked" (funds recoverable after admin unpause / update)
+  is NOT fund loss - unless the bounty matrix says otherwise.
+- `// TODO`, `// XXX`, placeholder reverts are known dev items, NOT
+  findings.
+
+### Economic validation for price-manipulation candidates
+
+Quantify "attacker spends X to manipulate, extracts Y". If Y ≤ X,
+EXCLUDE. Same-pool manipulation costs real money and is by design; only
+cross-venue oracle attacks with cost / value asymmetry are vulns.
+
+### For every MEDIUM+ candidate, answer:
+
+- Exact sequence of user-controlled actions that triggers it.
+- Mathematical proof it is possible.
+- Is the damage permanent / irreversible? (Recoverable via admin = not a
+  vuln unless bounty says otherwise.)
+- Is the behavior intentional design?
+- Would a dev fix the code or the docs?
+
+Candidates that survive flow to Phase 7. Write a working ledger to
+scratch (`$AUDIT_DIR/_candidates_working.md`) listing each candidate's
+status. Do NOT write findings yet; findings are only written after PoC
+in Phase 8.
+
+## PHASE 7: PoC development and validation
+
+**Every MEDIUM+ candidate MUST be verified by RUNNING code, not just
+reading source.** Spawn an `exploit-writer` agent per candidate.
+
+The agent definition lives at `<this-skill>/agents/exploit-writer.md`.
+
+Each agent receives:
+
+- The candidate (title, contract, file:line, attack path, preconditions,
+  expected impact).
+- Chain name and a pinned fork block number.
+- The slug derived from the candidate title.
+- Path to write the PoC: `$POC_DIR/<slug>/Exploit.t.sol`.
+- Sibling reproduce script path: `$POC_DIR/<slug>/reproduce.sh`.
+
+### Foundry template
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+import "forge-std/Test.sol";
+
+contract Exploit_<slug> is Test {
+    address attacker;
+    function setUp() public {
+        // Pick the fork that matches deployment status:
+        //   - Deployed on mainnet of chain X → vm.createSelectFork("X", BLOCK)
+        //   - Testnet only → vm.createSelectFork("X-testnet", BLOCK)
+        //   - Not yet deployed → no fork, deploy from source
+        vm.createSelectFork("mainnet", 19_200_000);
+        attacker = makeAddr("attacker");
+        vm.deal(attacker, 1_000_000 ether);
+    }
+    function testExploit() public {
+        vm.startPrank(attacker);
+        uint256 before = attacker.balance;
+        // === EXPLOIT STEPS ===
+        uint256 afterBal = attacker.balance;
+        vm.stopPrank();
+        assertGt(afterBal, before, "Exploit should be profitable");
+        emit log_named_decimal_uint("Profit", afterBal - before, 18);
+    }
+}
+```
+
+Rules:
+
+- Mainnet fork only (or matching testnet if the contract is only there).
+  Pin the block.
+- `vm.deal()` funding. NEVER a real private key.
+- `vm.prank` / `startPrank` for impersonation. `vm.label()` every named
+  address.
+- Implement flash-loan callbacks if used.
+- Assert BOTH that the call succeeds AND that profit / impact occurred.
+  A PoC that proves only "the call did not revert" is not a PoC.
+
+### reproduce.sh template
+
+```bash
+#!/usr/bin/env bash
+# Reproduce <slug>: run from the project root.
+set -euo pipefail
+forge test \
+  --match-path docs/gebug-audit/report/POC/<slug>/Exploit.t.sol \
+  --match-test testExploit \
+  -vvvv
+```
+
+Make it executable: `chmod +x $POC_DIR/<slug>/reproduce.sh`.
+
+### Validation outcomes
+
+- **PASSING**: PoC compiles, runs, asserts profit. Candidate becomes a
+  finding in Phase 8. Capture full forge output as `console.txt` in the
+  POC folder.
+- **FAILED**: PoC compiles but the assertion fails OR the math
+  derivation does not check out. Mark candidate INVALID in the working
+  ledger. Document why under the candidate's notes.
+- **NOT_BUILT**: Candidate was discarded before PoC (per
+  rejection-only-with-proof). Record the rejection citation.
+
+**HARD RULE**: no MEDIUM+ finding ships in the final report without a
+PASSING PoC or verifiable local execution output. Otherwise downgrade to
+LOW / INFO.
+
+### Headline exploit
+
+After all per-finding PoCs, pick the single highest-impact PASSING PoC
+and copy / adapt it to `$EXPLOIT_DIR/Exploit.sol`. This is the "showcase"
+exploit. If there are no Criticals, the highest-severity PASSING PoC
+becomes the headline. If no PoC passed, leave `$EXPLOIT_DIR/` empty and
+note this in `REPORT.md`.
+
+## PHASE 8: Write findings
+
+For each PASSING PoC, write one file under
+`$FINDING_DIR/{SEVERITY}_{slug}.md` using the Finding Template from
+`SKILL.md`.
+
+Reference the per-finding PoC by relative path
+(`report/POC/<slug>/Exploit.t.sol`) and the reproduce script
+(`report/POC/<slug>/reproduce.sh`).
+
+Paste the actual forge PASS output (truncate to the relevant lines).
+
+Cross-link related findings (e.g., shared root cause across two
+contracts) at the bottom of each finding's "References" section.
+
+## PHASE 9: Write the headline report
+
+`$REPORT_DIR/REPORT.md`:
+
+```markdown
+# Security audit report: {Protocol Name}
+
+- **Audit date:** YYYY-MM-DD
+- **Source commit:** abc1234
+- **Chain:** Ethereum
+- **Auditor:** gebug (gebug-brainstorm + gebug-work)
+- **Bounty platform:** Cantina
+
+## Executive summary
+
+- Scope: N contracts, M total LoC.
+- Findings: Critical: c, High: h, Medium: m, Low: l, Info: i.
+- Submittable (confidence >= 60, no gate failures): K.
+
+## Scope
+
+| Contract | Address | LoC | GitHub |
+| ... |
+
+## Findings summary
+
+| # | Severity | Title | Contract | PoC status | Confidence |
+| 1 | Critical | First-supplier hToken inflation | Vault.sol | PASSING | 92 |
+| ... |
+
+## Detailed findings
+
+Link each finding file. One bullet per finding with a one-sentence
+summary.
+
+## Fuzzing summary
+
+Link to `fuzzing/FUZZING.md`. Note any broken invariants that turned into
+findings, and any that surprised even though no exploit landed.
+
+## Methodology
+
+- Static analysis: Slither (+ Aderyn if used).
+- Manual: parallel vuln-hunter agents per subsystem.
+- Fuzzing: Foundry invariants (+ Echidna / Halmos as relevant).
+- PoC: Foundry mainnet fork at pinned block.
+
+## Out of scope
+
+Verbatim from `BOUNTY_MATRIX.md`.
+
+## Honest negative notes (if applicable)
+
+For any rejected candidate, the rejection citation per the
+rejection-only-with-proof rule.
+
+## Cite verification
+
+All file:line citations and contract / function names were grep-verified
+against the source at commit abc1234.
+```
+
+## PHASE 10: Final anti-hallucination check
+
+```bash
+# 1. Citations
+for f in "$FINDING_DIR"/*.md; do
+  for cite in $(grep -oE '[a-zA-Z_/.-]+\.sol:L[0-9]+(-L[0-9]+)?' "$f"); do
+    file=${cite%:L*}; line=${cite##*:L}
+    test -f "<target-repo>/$file" || echo "MISSING FILE in $f: $file"
+  done
+done
+
+# 2. Em dashes
+! grep -rl '-' "$AUDIT_DIR/"
+
+# 3. PoC smoke run
+for poc in "$POC_DIR"/*/reproduce.sh; do
+  test -x "$poc" || echo "NOT EXECUTABLE: $poc"
+done
+
+# 4. Required files present
+for required in \
+  "$REPORT_DIR/REPORT.md" \
+  "$REPORT_DIR/INVARIANTS.md" \
+  "$REPORT_DIR/slither-summary.txt" \
+  "$REPORT_DIR/slither-high-impact.txt" \
+  "$FUZZING_DIR/FUZZING.md"; do
+  test -f "$required" || echo "MISSING REQUIRED: $required"
+done
+```
+
+If any check fails, fix before closing.
+
+## PHASE 11: Closing summary to user
+
+Print exactly:
+
+```
+Audit complete.
+
+Findings: N (Critical: c, High: h, Medium: m, Low: l, Info: i)
+Submittable (confidence >= 60, no gate failures): K
+
+Report:           <target-repo>/docs/gebug-audit/report/REPORT.md
+Findings dir:     <target-repo>/docs/gebug-audit/finding/
+Headline exploit: <target-repo>/docs/gebug-audit/exploit/Exploit.sol
+Per-finding PoCs: <target-repo>/docs/gebug-audit/report/POC/
+Fuzzing:          <target-repo>/docs/gebug-audit/fuzzing/
+
+All cites verified.
+
+Never auto-submit. Review every finding before sharing externally.
+```
+
+If `K = 0`, list which gates failed for the closest candidates so the
+user knows what evidence would flip them.
+
+---
+
+## Focused modes
+
+If the user asks for a narrower task than the full pipeline (after a
+brainstorm has produced the definition files), still use this pipeline
+but narrow execution:
+
+### `audit-only <subsystem>`
+
+Skip Phase 7 (no PoC). Useful for early-stage review where the user
+wants candidate quality before committing PoC budget. All `finding/`
+files are written with `poc_status: NOT_BUILT` and severity capped at
+HIGH pending PoC. Honest-negative rules still apply.
+
+### `exploit-only <candidate-id>`
+
+Run only Phase 7 for a single candidate from `CANDIDATES.md`. Writes a
+single PoC at `$POC_DIR/<slug>/`. Updates `CANDIDATES.md` with the PoC
+status.
+
+### `fork-test <slug>`
+
+Re-run an existing PoC at a different fork block. Update the
+`reproduce.sh` block number, run, report pass / fail / profit / gas.
+
+### `triage <candidate-id>`
+
+Apply the validity gate to a single candidate without building a PoC.
+Returns the rejection citation if rejected, or "passes gate; recommend
+PoC" otherwise.
+
+### `report-only`
+
+Skip everything except Phases 8 - 11. Useful when the user fixed a
+finding template and wants to regenerate the report from existing
+PoCs.
