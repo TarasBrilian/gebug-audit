@@ -113,8 +113,18 @@ For the deep audit (`/gebug-work`):
 
 ### Environment
 
-- `PENTEST_HOME` (optional): root pentest workspace for clones and
-  scratch. If unset, `pwd` is used.
+The skill writes everything relative to the current working directory
+(`cwd`) at invocation time. Auto-detects two scenarios:
+
+- **Scenario A (external audit)**: cwd does not look like a Foundry/Hardhat
+  project. Skill clones the target repo into `cwd/<repo-name>/` and writes
+  audit output to `cwd/<repo-name>/docs/gebug-audit/`.
+- **Scenario B (self audit)**: cwd has `foundry.toml`+`src/`+`test/`,
+  `hardhat.config.*`+`contracts/`, or `package.json` with Hardhat/Foundry
+  dependencies. Skill writes output to `cwd/gebug-audit/`. No clone.
+
+`PENTEST_HOME` is no longer used for audit output. It can remain set for
+global toolchain cache (solc, etc.).
 
 ## Usage
 
@@ -144,19 +154,26 @@ telling you to run `/gebug-work`.
 
 ## Output
 
-The brainstorm writes into the TARGET REPO's `docs/` directory:
+The brainstorm writes four definition files, location depends on scenario:
 
 ```
-<target-repo>/docs/gebug-audit/definition/
+# Scenario A (external):
+cwd/<repo-name>/docs/gebug-audit/definition/
+├── DEFINITION.md
+├── CANDIDATES.md
+├── SAFETY_PREFLIGHT.md
+└── BOUNTY_MATRIX.md
+
+# Scenario B (self):
+cwd/gebug-audit/definition/
 ├── DEFINITION.md
 ├── CANDIDATES.md
 ├── SAFETY_PREFLIGHT.md
 └── BOUNTY_MATRIX.md
 ```
 
-`$PENTEST_HOME` may be used as scratch space during the run, but the
-four files above must end up in the target repo before declaring the
-brainstorm complete.
+All output is contained under `cwd/`. Scratch lives in
+`<audit-dir>/_scratch/` and is `.gitignore`-d automatically.
 
 ## How the pipeline works
 

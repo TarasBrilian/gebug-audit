@@ -101,22 +101,55 @@ before relying on them.
 
 ## Output Layout (single source of truth)
 
-Every brainstorm run writes into `<target-repo>/docs/gebug-audit/`. The
-brainstorm phase owns ONLY the `definition/` subtree. The work phase
-populates everything else.
+The skill RESOLVES `<target-repo>` based on the user's current working
+directory (`cwd`) at invocation time. Two scenarios:
+
+### Scenario A: external repo audit (no foundry/hardhat project in cwd)
+
+- Source clone destination: `cwd/<repo-name>/` (slug = repo name from
+  GitHub URL, lowercased).
+- Output dir: `cwd/<repo-name>/docs/gebug-audit/`.
+- Foundry env (`foundry.toml` + `fout-libs/forge-std/`) is created INSIDE
+  `cwd/<repo-name>/` so PoCs in `report/POC/` can compile.
+- Scratch (slither output, vuln-hunter agent outputs, _preflight, fout/
+  build artifacts) lives in `cwd/<repo-name>/docs/gebug-audit/_scratch/`.
+
+### Scenario B: user's own project audit (foundry/hardhat detected in cwd)
+
+- `<target-repo>` is `cwd` itself. NO git clone.
+- Output dir: `cwd/gebug-audit/`.
+- Foundry env strategy:
+  - If `cwd/foundry.toml` exists: skill APPENDS `gebug-audit/report/POC`
+    to `[profile.default].test` entries (non-destructive append). The
+    original config is saved to
+    `cwd/gebug-audit/_scratch/foundry-toml.original` and the patch diff
+    to `cwd/gebug-audit/_scratch/foundry-toml-patch.diff` so the user
+    can review/revert.
+  - If Hardhat-only (no foundry.toml): skill CREATES a minimal
+    `cwd/foundry.toml` with `src = <user's src>` and a test entry
+    covering `gebug-audit/report/POC`. The new file is reported in the
+    Phase 11 closing message so the user knows it was added.
+- Scratch in `cwd/gebug-audit/_scratch/`.
+
+### Tree layout (both scenarios share this subtree)
 
 ```
-<target-repo>/docs/gebug-audit/
+<target-repo>/[docs/]gebug-audit/      ← "docs/" prefix only in Scenario A
 ├── definition/                          ← OWNED BY /gebug-brainstorm
 │   ├── DEFINITION.md                    summary, scope, architecture map, attack-vector docs to load
 │   ├── CANDIDATES.md                    initial vuln candidates (post light recon)
 │   ├── SAFETY_PREFLIGHT.md              in-scope / forbidden / output dir
 │   └── BOUNTY_MATRIX.md                 severity matrix copied verbatim from bounty page
+├── _scratch/                            ← intermediate work (gitignored)
 ├── finding/                             ← populated by /gebug-work
 ├── fuzzing/                             ← populated by /gebug-work
 ├── exploit/                             ← populated by /gebug-work
 └── report/                              ← populated by /gebug-work
 ```
+
+Note: in Scenario A the tree lives under `<target-repo>/docs/gebug-audit/`
+(inside the cloned source repo). In Scenario B it lives at
+`cwd/gebug-audit/` (top-level next to the user's `src/`, `test/`).
 
 Rules:
 
@@ -128,22 +161,34 @@ Rules:
   `/gebug-work` runs. If one is missing, `/gebug-work` will refuse to
   start.
 - Never mix multiple targets in one `gebug-audit/` directory.
+- The skill auto-generates a `gebug-audit/.gitignore` that skips
+  `_scratch/`, `_preflight/`, `fout/`, `cache/`, `*.log`.
 
-`$PENTEST_HOME` (or the current working directory if unset) may be used as
-scratch for clones and intermediate Slither output, but the four files
-above MUST be written into the target repo before declaring brainstorm
-complete.
+`$PENTEST_HOME` is NOT used as audit output. It may still be used as a
+global toolchain cache (solc downloads, etc.) but NOT for audit
+artifacts. All audit output lands in cwd-derived paths above.
 
 ## Pre-Check
 
 Before starting a new brainstorm:
 
-1. Resolve the target repo root (the directory the user pointed at, or the
-   `targets/<protocol>/<repo>` clone if you fetched it).
-2. Compute today's UTC date via `date -u +%F`.
-3. Check whether `<target-repo>/docs/gebug-audit/definition/DEFINITION.md`
+1. Compute today's UTC date via `date -u +%F`.
+2. **Auto-detect Scenario A vs B from cwd:**
+   - Marker F: `cwd/foundry.toml` AND (`cwd/src/` OR `cwd/contracts/`) AND `cwd/test/`.
+   - Marker H: (`cwd/hardhat.config.js` OR `cwd/hardhat.config.ts`) AND `cwd/contracts/`.
+   - Marker P: `cwd/package.json` contains `hardhat`, `@nomicfoundation/hardhat-*`,
+     or `@foundry-rs/*` in `devDependencies` or `dependencies`.
+   - If ANY of F, H, P matches → Scenario B. `<target-repo>` = `cwd`,
+     output dir = `cwd/gebug-audit/`.
+   - If NONE match → Scenario A. `<target-repo>` will be `cwd/<repo-name>/`
+     (created in Phase 3 after the user provides the GitHub URL).
+3. **Announce detection result + confirm.** Print one sentence:
+   `Detected: Scenario {A|B}. Output will land in <abs path>.` Then call
+   `AskUserQuestion` with options "Proceed" / "Override to other scenario"
+   / "Cancel". Do not proceed without confirmation.
+4. Check whether `<target-repo>/[docs/]gebug-audit/definition/DEFINITION.md`
    already exists.
-4. If it does, read its header for `source_commit` and `scope_sha256`.
+5. If it does, read its header for `source_commit` and `scope_sha256`.
    - If BOTH match the current commit and current scope, print a `[SKIP]`
      summary and do not overwrite.
    - If only the commit changed, tell the user a previous brainstorm exists

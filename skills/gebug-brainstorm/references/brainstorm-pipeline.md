@@ -10,15 +10,28 @@ Optimism, Avalanche, and other EVM-compatible chains.
 ## Conventions
 
 - Capture the audit date once at start: `AUDIT_DATE=$(date -u +%F)`.
-- All four output files live under
-  `<target-repo>/docs/gebug-audit/definition/`.
+- Path resolution is determined by `SCENARIO` (see PHASE 0):
+  - Scenario A (external): `<target-repo>` = `$CWD/<repo-name>/`,
+    `AUDIT_DIR` = `<target-repo>/docs/gebug-audit/`.
+  - Scenario B (self): `<target-repo>` = `$CWD`,
+    `AUDIT_DIR` = `<target-repo>/gebug-audit/`.
 - Set the output directory once at start and reuse:
   ```bash
-  DEFINITION_DIR="<target-repo>/docs/gebug-audit/definition"
-  mkdir -p "$DEFINITION_DIR"
+  CWD=$(pwd)
+  # SCENARIO resolved in Phase 0 below.
+  # In Scenario A, after Phase 3 clone:
+  TARGET_REPO="$CWD/<repo-name>"
+  AUDIT_DIR="$TARGET_REPO/docs/gebug-audit"
+  # In Scenario B (no clone):
+  TARGET_REPO="$CWD"
+  AUDIT_DIR="$TARGET_REPO/gebug-audit"
+  # Definition dir is identical in both:
+  DEFINITION_DIR="$AUDIT_DIR/definition"
+  SCRATCH_DIR="$AUDIT_DIR/_scratch"
+  mkdir -p "$DEFINITION_DIR" "$SCRATCH_DIR"
   ```
-- `$PENTEST_HOME` (or `pwd`) is scratch only. Final files live in
-  `$DEFINITION_DIR`.
+- Scratch lives in `$SCRATCH_DIR` (NOT `$PENTEST_HOME`). `$PENTEST_HOME`
+  is reserved for global toolchain cache only.
 - FORMATTING: never use an em dash. Use a regular hyphen.
 
 ## Supported chains
@@ -43,17 +56,70 @@ command -v forge   >/dev/null || echo "MISSING: forge (Foundry) - needed for for
 command -v cast    >/dev/null || echo "MISSING: cast (Foundry) - needed for on-chain reads"
 command -v slither >/dev/null || echo "MISSING: slither (pip install slither-analyzer)"
 command -v git     >/dev/null || echo "MISSING: git"
-[ -n "$PENTEST_HOME" ] || echo "INFO: PENTEST_HOME unset; will use pwd as scratch"
 ```
 
 If `forge`, `cast`, `slither`, or `git` are missing, stop and tell the user
 to install them before continuing.
 
-## PHASE 0: Pre-check (skip already brainstormed)
+## PHASE 0: Auto-detect scenario + pre-check (skip already brainstormed)
+
+### 0a. Auto-detect Scenario A vs B from cwd
 
 ```bash
-if [ -f "<target-repo>/docs/gebug-audit/definition/DEFINITION.md" ]; then
-  head -30 "<target-repo>/docs/gebug-audit/definition/DEFINITION.md"
+CWD=$(pwd)
+SCENARIO=""
+
+# Marker F: foundry project
+if [ -f "$CWD/foundry.toml" ] && { [ -d "$CWD/src" ] || [ -d "$CWD/contracts" ]; } && [ -d "$CWD/test" ]; then
+  SCENARIO="B"
+  MARKER="F (foundry.toml + src/contracts + test)"
+fi
+
+# Marker H: hardhat project
+if [ -z "$SCENARIO" ] && { [ -f "$CWD/hardhat.config.js" ] || [ -f "$CWD/hardhat.config.ts" ]; } && [ -d "$CWD/contracts" ]; then
+  SCENARIO="B"
+  MARKER="H (hardhat config + contracts/)"
+fi
+
+# Marker P: package.json with hardhat/foundry-rs dep
+if [ -z "$SCENARIO" ] && [ -f "$CWD/package.json" ]; then
+  if grep -qE '"(hardhat|@nomicfoundation/hardhat-|@foundry-rs/)' "$CWD/package.json"; then
+    SCENARIO="B"
+    MARKER="P (package.json dev dep)"
+  fi
+fi
+
+# Default: external repo
+[ -z "$SCENARIO" ] && SCENARIO="A" && MARKER="(no markers detected)"
+
+echo "Detected: Scenario $SCENARIO  [marker: $MARKER]"
+```
+
+### 0b. Announce + confirm scenario
+
+Print one sentence describing what the skill will do, then call
+`AskUserQuestion`:
+
+- Scenario A: `Output will land in $CWD/<repo-name>/docs/gebug-audit/ (repo name resolved in Batch 1 of the interview).`
+- Scenario B: `Output will land in $CWD/gebug-audit/. Source is your current project (no clone).`
+
+Options:
+- "Proceed" (proceed with detected scenario)
+- "Override to other scenario" (user wants Scenario A even though markers say B, or vice versa)
+- "Cancel" (stop the skill)
+
+If user picks "Override", ask follow-up free-form what they want.
+
+### 0c. Pre-check (skip already brainstormed)
+
+After scenario confirmed, resolve `AUDIT_DIR`:
+
+- Scenario A: AUDIT_DIR will be `$CWD/<repo-name>/docs/gebug-audit/` (NOT YET KNOWN until Batch 1 reveals repo). Defer the existence check until after Batch 1.
+- Scenario B: AUDIT_DIR = `$CWD/gebug-audit/`. Check now:
+
+```bash
+if [ -f "$AUDIT_DIR/definition/DEFINITION.md" ]; then
+  head -30 "$AUDIT_DIR/definition/DEFINITION.md"
 fi
 ```
 
@@ -122,11 +188,19 @@ rather than another structured batch.
 
 ## PHASE 2: Safety preflight
 
-Resolve `<target-repo>` from the answers. If the source is a GitHub URL or
-contract address, the target repo will be created in `$PENTEST_HOME/targets/<protocol>/<repo>/`
-after Phase 3 - for now, write the preflight there.
+Resolve `<target-repo>` from the answers based on SCENARIO from PHASE 0:
 
-If the source is a local path, `<target-repo>` is that path.
+- Scenario A (external, no project markers in cwd): if source is a GitHub
+  URL, target repo will be created at `$CWD/<repo-name>/` after Phase 3.
+  `<repo-name>` is the lowercased final path segment of the URL (e.g.,
+  `https://github.com/rocket-pool/rocketpool` -> `rocketpool`). If source
+  is an Etherscan address, `<repo-name>` = `<protocol-slug>-<address-prefix>`.
+- Scenario B (project markers in cwd): `<target-repo>` = `$CWD` directly.
+  No clone is performed.
+
+For now (Phase 2 preflight), write to `$AUDIT_DIR/SAFETY_PREFLIGHT.md`
+using the resolved AUDIT_DIR from Phase 0 / Phase 3 (see "Conventions"
+at top of file for the exact computation).
 
 Write `$DEFINITION_DIR/SAFETY_PREFLIGHT.md`:
 
@@ -137,7 +211,7 @@ Write `$DEFINITION_DIR/SAFETY_PREFLIGHT.md`:
 **Bounty platform:** Cantina
 **Target repo:** <absolute path>
 **Chain:** Ethereum
-**Output dir:** <target-repo>/docs/gebug-audit/
+**Output dir:** `$AUDIT_DIR` (see Conventions for scenario-specific resolution)
 
 ## In-scope contracts
 
@@ -175,27 +249,49 @@ rewrite the file before continuing.
 
 ## PHASE 3: Acquire source
 
-### 3a. GitHub provided
+### 3a. GitHub provided (Scenario A only)
+
+Skip this phase entirely in Scenario B (source is `$CWD`, already there).
 
 ```bash
-mkdir -p "$PENTEST_HOME/targets/<protocol>"
-git clone <repo-url> "$PENTEST_HOME/targets/<protocol>/<repo>"
-cd "$PENTEST_HOME/targets/<protocol>/<repo>"
+# SCENARIO is A
+REPO_NAME=$(basename "<repo-url>" .git | tr '[:upper:]' '[:lower:]')
+TARGET_REPO="$CWD/$REPO_NAME"
+if [ -d "$TARGET_REPO" ]; then
+  echo "Existing target dir found at $TARGET_REPO. Ask user: update / start fresh / hand off."
+  # Defer to user-confirmed branch per Phase 0 pre-check semantics.
+else
+  git clone <repo-url> "$TARGET_REPO"
+fi
+cd "$TARGET_REPO"
 git checkout <commit_hash>
-git rev-parse HEAD > /tmp/source_commit
+git rev-parse HEAD > "$SCRATCH_DIR/source_commit"
 ```
 
 If the user did not pin a commit, fail loud and ask.
 
-### 3b. Address provided
+### 3b. Address provided (Scenario A)
 
 ```bash
-mkdir -p "$PENTEST_HOME/targets/<protocol>"
-cast etherscan-source <address> --chain <chain> -d "$PENTEST_HOME/targets/<protocol>/<contract>/"
+REPO_NAME="<protocol-slug>-${ADDRESS:2:8}"
+TARGET_REPO="$CWD/$REPO_NAME"
+mkdir -p "$TARGET_REPO"
+cast etherscan-source <address> --chain <chain> -d "$TARGET_REPO/"
 ```
 
 If the chain is not Ethereum, set the explorer API key via
 `ETHERSCAN_API_KEY` and the appropriate `--chain` flag.
+
+### 3c. Scenario B (skip - source already in cwd)
+
+```bash
+TARGET_REPO="$CWD"
+# No clone. Just verify expected structure based on detection marker:
+#   F: src/ or contracts/ exists, foundry.toml exists
+#   H: contracts/ exists, hardhat.config.* exists
+#   P: at least one *.sol file under tree
+find "$TARGET_REPO" -maxdepth 4 -name '*.sol' | head -5
+```
 
 ### 3c. Both
 
@@ -245,7 +341,7 @@ Read any provided existing audits. Pull the published findings into the
 ## PHASE 5: Quick static pass (recon only)
 
 ```bash
-slither <target-repo> --print human-summary 2>&1 | tee "$PENTEST_HOME/scratch/slither-human-summary.txt"
+slither "$TARGET_REPO" --print human-summary 2>&1 | tee "$SCRATCH_DIR/slither-human-summary.txt"
 ```
 
 If Slither fails on missing remappings:
@@ -486,10 +582,12 @@ Print exactly:
 ```
 Brainstorm complete.
 
-Definition: <target-repo>/docs/gebug-audit/definition/DEFINITION.md
-Candidates: <target-repo>/docs/gebug-audit/definition/CANDIDATES.md   (N candidates)
-Safety:     <target-repo>/docs/gebug-audit/definition/SAFETY_PREFLIGHT.md
-Bounty:     <target-repo>/docs/gebug-audit/definition/BOUNTY_MATRIX.md
+Definition: $DEFINITION_DIR/DEFINITION.md
+Candidates: $DEFINITION_DIR/CANDIDATES.md   (N candidates)
+Safety:     $DEFINITION_DIR/SAFETY_PREFLIGHT.md
+Bounty:     $DEFINITION_DIR/BOUNTY_MATRIX.md
+
+(Resolved absolute paths printed verbatim; SCENARIO and $CWD determine the prefix.)
 
 All cites verified.
 

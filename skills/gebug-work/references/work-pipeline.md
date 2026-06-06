@@ -9,17 +9,52 @@ live broadcast.
 
 ## Conventions
 
-- Capture once at start:
+- Capture once at start. Re-run the SAME detection from
+  `/gebug-brainstorm` Phase 0 to recover `$AUDIT_DIR`:
   ```bash
   AUDIT_DATE=$(date -u +%F)
-  AUDIT_DIR="<target-repo>/docs/gebug-audit"
+  CWD=$(pwd)
+
+  # Auto-detect scenario (same logic as brainstorm-pipeline Phase 0)
+  SCENARIO=""
+  if [ -f "$CWD/foundry.toml" ] && { [ -d "$CWD/src" ] || [ -d "$CWD/contracts" ]; } && [ -d "$CWD/test" ]; then
+    SCENARIO="B"
+  elif { [ -f "$CWD/hardhat.config.js" ] || [ -f "$CWD/hardhat.config.ts" ]; } && [ -d "$CWD/contracts" ]; then
+    SCENARIO="B"
+  elif [ -f "$CWD/package.json" ] && grep -qE '"(hardhat|@nomicfoundation/hardhat-|@foundry-rs/)' "$CWD/package.json"; then
+    SCENARIO="B"
+  else
+    SCENARIO="A"
+  fi
+
+  if [ "$SCENARIO" = "B" ]; then
+    TARGET_REPO="$CWD"
+    AUDIT_DIR="$TARGET_REPO/gebug-audit"
+  else
+    # Scenario A: find subdirectory of $CWD that has a populated
+    # docs/gebug-audit/definition/. If multiple, ask user; if none, refuse.
+    candidates=$(find "$CWD" -maxdepth 4 -type d -name 'definition' -path '*/docs/gebug-audit/definition' 2>/dev/null)
+    # ... resolve to a single TARGET_REPO; AUDIT_DIR = $TARGET_REPO/docs/gebug-audit
+    AUDIT_DIR="$TARGET_REPO/docs/gebug-audit"
+  fi
+
   DEFINITION_DIR="$AUDIT_DIR/definition"
   FINDING_DIR="$AUDIT_DIR/finding"
   FUZZING_DIR="$AUDIT_DIR/fuzzing"
   EXPLOIT_DIR="$AUDIT_DIR/exploit"
   REPORT_DIR="$AUDIT_DIR/report"
   POC_DIR="$REPORT_DIR/POC"
-  mkdir -p "$FINDING_DIR" "$FUZZING_DIR" "$EXPLOIT_DIR" "$REPORT_DIR" "$POC_DIR"
+  SCRATCH_DIR="$AUDIT_DIR/_scratch"
+  mkdir -p "$FINDING_DIR" "$FUZZING_DIR" "$EXPLOIT_DIR" "$REPORT_DIR" "$POC_DIR" "$SCRATCH_DIR"
+
+  # Auto-generate .gitignore (idempotent)
+  cat > "$AUDIT_DIR/.gitignore" <<'EOF'
+_scratch/
+_preflight/
+fout/
+cache/
+*.log
+EOF
   ```
 - All four definition files MUST exist before any other phase runs.
 - All Foundry PoCs land in `$POC_DIR/<finding-slug>/Exploit.t.sol` with a
@@ -29,6 +64,14 @@ live broadcast.
   mainnet.
 - Use `vm.deal()` for attacker funding (simulated, zero risk).
 - Pin block numbers for reproducibility.
+- **Foundry env setup**:
+  - Scenario A: skill creates `$TARGET_REPO/foundry.toml` (if not already
+    present) + `$TARGET_REPO/fout-libs/forge-std/` for PoC compilation.
+  - Scenario B: skill PATCHES the user's existing `$TARGET_REPO/foundry.toml`
+    to add `gebug-audit/report/POC` to the test path. Original config
+    saved to `$SCRATCH_DIR/foundry-toml.original`; patch diff saved to
+    `$SCRATCH_DIR/foundry-toml-patch.diff`. If Hardhat-only (no foundry.toml),
+    skill CREATES a minimal one at project root.
 - FORMATTING: NEVER use an em dash. Use a regular hyphen.
 
 ## Slug derivation
@@ -68,7 +111,7 @@ If any is missing, refuse to start and tell the user to run
 `/gebug-brainstorm`.
 
 Read `DEFINITION.md` header. If `source_commit` differs from
-`git -C <target-repo> rev-parse HEAD`, ask the user whether to:
+`git -C "$TARGET_REPO" rev-parse HEAD`, ask the user whether to:
 
 - (a) rebrainstorm first,
 - (b) run in DIFF-FOCUSED mode against changed files only (prioritize
@@ -85,10 +128,10 @@ and stop.
 ## PHASE 1: Static analysis
 
 ```bash
-slither <target-repo> --print human-summary 2>&1 \
+slither "$TARGET_REPO" --print human-summary 2>&1 \
   | tee "$REPORT_DIR/slither-summary.txt"
 
-slither <target-repo> \
+slither "$TARGET_REPO" \
   --detect reentrancy-eth,reentrancy-no-eth,reentrancy-benign,reentrancy-events,reentrancy-unlimited-gas,uninitialized-state,uninitialized-storage,arbitrary-send-erc20,arbitrary-send-eth,unchecked-transfer,unprotected-upgrade,suicidal,delegatecall-loop,controlled-delegatecall,events-access,events-maths,incorrect-equality,locked-ether,unused-return,weak-prng,divide-before-multiply,incorrect-shift,tx-origin \
   2>&1 | tee "$REPORT_DIR/slither-high-impact.txt"
 ```
@@ -96,13 +139,13 @@ slither <target-repo> \
 If Slither fails on dependencies:
 
 ```bash
-slither <target-repo> --solc-remaps "@openzeppelin=lib/openzeppelin-contracts" ...
+slither "$TARGET_REPO" --solc-remaps "@openzeppelin=lib/openzeppelin-contracts" ...
 ```
 
 Second-engine pass when available:
 
 ```bash
-aderyn <target-repo> -o "$REPORT_DIR/aderyn-report.md"
+aderyn "$TARGET_REPO" -o "$REPORT_DIR/aderyn-report.md"
 ```
 
 Cross-reference detector findings against `CANDIDATES.md`. New patterns
@@ -159,7 +202,7 @@ deployer: "0x10000"
 sender: ["0x10000", "0x20000", "0x30000"]
 ```
 
-Run: `echidna <target-repo>/contracts/Target.sol --config $FUZZING_DIR/echidna.yaml`.
+Run: `echidna "$TARGET_REPO/contracts/Target.sol" --config "$FUZZING_DIR/echidna.yaml"`.
 
 ### Halmos symbolic execution
 
@@ -571,7 +614,7 @@ against the source at commit abc1234.
 for f in "$FINDING_DIR"/*.md; do
   for cite in $(grep -oE '[a-zA-Z_/.-]+\.sol:L[0-9]+(-L[0-9]+)?' "$f"); do
     file=${cite%:L*}; line=${cite##*:L}
-    test -f "<target-repo>/$file" || echo "MISSING FILE in $f: $file"
+    test -f "$TARGET_REPO/$file" || echo "MISSING FILE in $f: $file"
   done
 done
 
@@ -606,11 +649,13 @@ Audit complete.
 Findings: N (Critical: c, High: h, Medium: m, Low: l, Info: i)
 Submittable (confidence >= 60, no gate failures): K
 
-Report:           <target-repo>/docs/gebug-audit/report/REPORT.md
-Findings dir:     <target-repo>/docs/gebug-audit/finding/
-Headline exploit: <target-repo>/docs/gebug-audit/exploit/Exploit.sol
-Per-finding PoCs: <target-repo>/docs/gebug-audit/report/POC/
-Fuzzing:          <target-repo>/docs/gebug-audit/fuzzing/
+Report:           $REPORT_DIR/REPORT.md
+Findings dir:     $FINDING_DIR/
+Headline exploit: $EXPLOIT_DIR/Exploit.sol
+Per-finding PoCs: $POC_DIR/
+Fuzzing:          $FUZZING_DIR/
+
+(Print resolved absolute paths verbatim; $AUDIT_DIR depends on Scenario A vs B from Phase 0.)
 
 All cites verified.
 

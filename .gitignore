@@ -1,0 +1,7 @@
+# Skill-internal brainstorm/audit artifacts (not for distribution via the skill repo)
+docs/
+
+# OS / editor noise
+.DS_Store
+*.swp
+*~

@@ -130,13 +130,26 @@ No invented APIs. No invented bytecode behavior.
 
 ## Output Layout (single source of truth)
 
+`<target-repo>` and `AUDIT_DIR` are resolved by Phase 0 based on the
+scenario detected by `/gebug-brainstorm`:
+
+- **Scenario A** (external audit): `AUDIT_DIR = $CWD/<repo-name>/docs/gebug-audit/`
+- **Scenario B** (user's own project): `AUDIT_DIR = $CWD/gebug-audit/`
+
+In both cases the subtree below is identical (relative to AUDIT_DIR):
+
 ```
-<target-repo>/docs/gebug-audit/
+$AUDIT_DIR/
 ├── definition/                          ← INPUT (from /gebug-brainstorm)
 │   ├── DEFINITION.md
 │   ├── CANDIDATES.md
 │   ├── SAFETY_PREFLIGHT.md
 │   └── BOUNTY_MATRIX.md
+│
+├── _scratch/                            ← intermediate work (gitignored)
+│   ├── slither-*.txt
+│   ├── vh-*.md                          vuln-hunter agent outputs
+│   └── foundry-toml-patch.diff          Scenario B only
 │
 ├── finding/                             ← OUTPUT (one file per finding)
 │   ├── CRITICAL_<short>.md
@@ -180,17 +193,29 @@ Mandatory rules:
   highest-impact one for `exploit/`. All Criticals also have per-finding
   PoCs under `report/POC/`.
 - Never mix multiple targets in one `gebug-audit/` directory.
+- The skill auto-generates `$AUDIT_DIR/.gitignore` that skips `_scratch/`,
+  `_preflight/`, `fout/`, `cache/`, `*.log`. In Scenario B this prevents
+  intermediate audit work from polluting the user's git history.
 
-`$PENTEST_HOME` (or `pwd` if unset) may be used as scratch during the run
-(intermediate Slither output, fuzzing scratch). Final artefacts must be
-moved into the layout above before declaring complete.
+`$PENTEST_HOME` is NOT used for audit output. It may be used for global
+toolchain cache only (solc downloads, etc.).
 
 ## Pre-Check
 
 Before starting:
 
-1. Confirm `<target-repo>/docs/gebug-audit/definition/` contains all four
-   files (`DEFINITION.md`, `CANDIDATES.md`, `SAFETY_PREFLIGHT.md`,
+0. **Resolve `<target-repo>` and `AUDIT_DIR` from cwd** by re-running the
+   detection logic from `/gebug-brainstorm` Phase 0:
+   - Marker F (foundry.toml + src/contracts + test/), Marker H (hardhat
+     config + contracts/), Marker P (package.json with hardhat/foundry-rs
+     dep). Any match -> Scenario B; otherwise -> Scenario A.
+   - Scenario A: AUDIT_DIR candidates = `$CWD/<dirname>/docs/gebug-audit/`
+     for each subdirectory of `$CWD` that contains a populated
+     `docs/gebug-audit/definition/` from a prior `/gebug-brainstorm` run.
+     If multiple match, ask the user which one to audit.
+   - Scenario B: AUDIT_DIR = `$CWD/gebug-audit/`.
+1. Confirm `$AUDIT_DIR/definition/` contains all four files
+   (`DEFINITION.md`, `CANDIDATES.md`, `SAFETY_PREFLIGHT.md`,
    `BOUNTY_MATRIX.md`). If any is missing, refuse to start and tell the
    user to run `/gebug-brainstorm` first.
 2. Read `DEFINITION.md` header. If `source_commit` does not match the
@@ -403,7 +428,7 @@ Before sending the report:
 3. Remove or downgrade every claim that cannot be tied to code, math, a
    fork test, or explicit scope language.
 4. Confirm no em-dash characters in any written file:
-   `! grep -rl '-' <target-repo>/docs/gebug-audit/`.
+   `! grep -rl '-' "$AUDIT_DIR/"` (em-dash literal, not regular hyphen).
 5. Confirm every per-finding PoC has a matching `reproduce.sh` that runs
    the test (smoke-run it once if possible).
 6. State `all cites verified` in the closing summary, or list exactly
@@ -419,10 +444,12 @@ Audit complete.
 Findings: <N> (Critical: <c>, High: <h>, Medium: <m>, Low: <l>, Info: <i>)
 Submittable (confidence >= 60, no gate failures): <K>
 
-Report:    <target-repo>/docs/gebug-audit/report/REPORT.md
-Findings:  <target-repo>/docs/gebug-audit/finding/
-Headline exploit: <target-repo>/docs/gebug-audit/exploit/Exploit.sol
-Per-finding PoCs: <target-repo>/docs/gebug-audit/report/POC/
+Report:    $AUDIT_DIR/report/REPORT.md
+Findings:  $AUDIT_DIR/finding/
+Headline exploit: $AUDIT_DIR/exploit/Exploit.sol
+Per-finding PoCs: $AUDIT_DIR/report/POC/
+
+(Print resolved absolute paths verbatim; $AUDIT_DIR depends on Scenario A vs B from Phase 0.)
 
 All cites verified.
 

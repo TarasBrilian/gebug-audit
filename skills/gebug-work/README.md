@@ -99,8 +99,10 @@ project-scoped install options.
 
 ### Environment
 
-- `PENTEST_HOME` (optional): scratch space for intermediate Slither
-  output and fuzzing harnesses-in-progress.
+- Audit output is auto-routed based on `cwd`:
+  - External audit (no Foundry/Hardhat markers): `cwd/<repo-name>/docs/gebug-audit/`
+  - Self audit (cwd has foundry.toml + src/ + test/, or hardhat config + contracts/, or package.json with hardhat/foundry dep): `cwd/gebug-audit/`
+- `PENTEST_HOME` (optional): no longer used for audit output. Reserved for global toolchain cache.
 
 ## Usage
 
@@ -112,8 +114,7 @@ After `/gebug-brainstorm` finishes:
 
 The skill will:
 
-1. Verify the four files in
-   `<target-repo>/docs/gebug-audit/definition/` exist.
+1. Verify the four files in `$AUDIT_DIR/definition/` exist (path resolved from cwd auto-detection).
 2. Re-confirm the safety preflight if stale.
 3. Run the full pipeline end to end.
 4. Stop and ask for approval before spawning more than 10
@@ -127,7 +128,7 @@ and tells you to run `/gebug-brainstorm` first.
 ## Output
 
 ```
-<target-repo>/docs/gebug-audit/
+$AUDIT_DIR/  (= cwd/<repo-name>/docs/gebug-audit/ for Scenario A, cwd/gebug-audit/ for Scenario B)
 ├── definition/                          INPUT (from /gebug-brainstorm)
 │   ├── DEFINITION.md
 │   ├── CANDIDATES.md
