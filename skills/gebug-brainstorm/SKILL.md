@@ -9,7 +9,10 @@ description: >-
   bridge, LST, LRT, restaking system, oracle integration, or governance system.
   Conducts a structured interview, acquires source code, runs light recon, and
   writes DEFINITION.md and CANDIDATES.md so the user can run /gebug-work next.
-  EVM-only.
+  EVM-only: do not trigger on Solana, Move (Sui / Aptos), CosmWasm, Stellar
+  Soroban, NEAR, ICP, or any non-EVM chain, and do not trigger on Solidity
+  development help requests (writing, formatting, learning) that are not
+  audit-framed.
 ---
 
 # gebug-brainstorm

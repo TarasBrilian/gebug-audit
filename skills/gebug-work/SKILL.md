@@ -8,7 +8,10 @@ description: >-
   /gebug-brainstorm. Reads docs/gebug-audit/definition/{DEFINITION,CANDIDATES,
   SAFETY_PREFLIGHT,BOUNTY_MATRIX}.md, runs static analysis, fuzzing,
   parallel vuln-hunter agents, applies the validity gate, builds Foundry
-  fork PoCs, and writes per-finding files plus the headline report. EVM-only.
+  fork PoCs, and writes per-finding files plus the headline report. EVM-only:
+  do not trigger on Solana, Move (Sui / Aptos), CosmWasm, Stellar Soroban,
+  NEAR, ICP, or any non-EVM chain, and do not trigger on generic forge / cast
+  / slither tutorial requests that have no DEFINITION.md to consume.
 ---
 
 # gebug-work
