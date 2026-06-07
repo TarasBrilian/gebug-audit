@@ -81,7 +81,18 @@ attack class. Example: title "First-supplier hToken inflation drains
 new depositors" → slug `first-supplier-htoken-inflation`.
 
 Slugs must be unique within an audit. If two findings collide, append a
-short hash of the contract path: `first-supplier-htoken-inflation-vault`.
+6-character hex slice of `sha256(contract_path_relative_to_target_repo)`:
+
+```bash
+HASH=$(printf '%s' "src/Vault.sol" | shasum -a 256 | cut -c1-6)
+# -> first-supplier-htoken-inflation-<HASH>
+```
+
+A descriptive suffix like `-vault` is NOT enough: three findings with the
+same title across three contracts all named `Vault.sol` in different
+directories still collide. The hash slice is deterministic per path so
+repeated audits land on the same slug, and 6 hex chars (~16M values)
+makes accidental collision negligible at audit scale.
 
 ## PHASE -1: Full toolchain pre-flight
 
