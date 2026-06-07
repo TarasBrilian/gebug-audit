@@ -430,6 +430,48 @@ price / rate / value. Multiple docs can apply.
 Record the list in `DEFINITION.md` so `/gebug-work` knows what to load
 without re-deriving.
 
+### Phase 6 pre-flight: verify docs reachable from /gebug-work install
+
+Before recording the list, confirm each doc exists in at least one
+plausible install location. Without this check, the brainstorm "succeeds"
+but `/gebug-work` Phase 0 refuses (work-pipeline.md "Verify each exists
+in `<this-skill>/references/attack-vectors/`"), which forces the user
+to rerun an entire brainstorm to recover. Loud failure here saves that
+round-trip.
+
+```bash
+VECTORS_TO_LOAD=( "lst-lrt.md" "oracle-integration.md" )  # populated per target type
+CANDIDATE_ROOTS=(
+  "$HOME/.claude/skills/gebug-work/references/attack-vectors"
+  "$HOME/.claude/plugins/cache/anthropic/claude-code/gebug-audit/skills/gebug-work/references/attack-vectors"
+  "$CWD/.claude/skills/gebug-work/references/attack-vectors"
+)
+
+MISSING=()
+for doc in "${VECTORS_TO_LOAD[@]}"; do
+  FOUND=""
+  for root in "${CANDIDATE_ROOTS[@]}"; do
+    if [ -f "$root/$doc" ]; then FOUND="$root/$doc"; break; fi
+  done
+  [ -z "$FOUND" ] && MISSING+=("$doc")
+done
+
+if [ "${#MISSING[@]}" -gt 0 ]; then
+  echo "REFUSE: attack-vector docs not found in any known gebug-work install path:"
+  printf '  - %s\n' "${MISSING[@]}"
+  echo "Searched roots:"
+  printf '  - %s\n' "${CANDIDATE_ROOTS[@]}"
+  echo "Reinstall via gebug-audit/install.sh or copy the docs manually,"
+  echo "then rerun /gebug-brainstorm."
+  exit 1
+fi
+```
+
+If your `/gebug-work` lives at a non-standard path (e.g., project-scoped
+install at `.claude/skills/gebug-work/`), add the root to
+`CANDIDATE_ROOTS` before running. The default list covers the three
+common install modes from README.md (user, plugin cache, project).
+
 ## PHASE 7: Generate initial candidates
 
 This is hypothesis generation, not deep analysis. Combine three sources:
