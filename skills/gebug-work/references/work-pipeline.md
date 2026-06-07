@@ -334,9 +334,16 @@ If total proposed agent count > 10, STOP. Show the user:
 - Total in-scope LoC.
 - Proposed agent count.
 - Per-agent subsystem list.
+- **Estimated output token cost.** Use the formula
+  `agents * 50_000 + Phase_6.5_triagers * 30_000 + Phase_7_pocs * 40_000`
+  as a rough order of magnitude. Example: 12 vuln-hunters + ~6 triagers
+  + ~4 PoCs ≈ 940k output tokens. Print the number so the user can
+  judge cost vs the bounty payout BEFORE spawning. "Approve" without a
+  number anchored to dollars is not informed consent.
 
 Ask for approval, scope narrowing, or split into multiple runs. Do not
-spawn until the user approves.
+spawn until the user approves. If the user narrows scope, RE-RUN the
+estimate against the narrower split before spawning.
 
 ### 4c. Spawn vuln-hunter agents
 
