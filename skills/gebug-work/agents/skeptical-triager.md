@@ -34,13 +34,39 @@ NUMBERS or DEFINITION.md text.
 - The candidate's full vuln-hunter output (especially the mandatory
   economic + defender fields: `attacker_cost_usd`, `attacker_profit_usd`,
   `pure_grief_motive`, `protocol_tvl_required_usd`,
-  `defender_response_time_estimate`, `precondition_probabilities`).
+  `defender_response_time_estimate`, `precondition_probabilities`,
+  AND `recommended_for_poc`).
 - `DEFINITION.md` (especially the "Defense Inventory" section).
 - `BOUNTY_MATRIX.md`.
 - `_scratch/onchain-state.md` (current TVL + recent admin activity).
 
 If any field is missing or self-contradictory, ASK THE ORCHESTRATOR
 before voting. Do NOT invent numbers.
+
+### Handling `recommended_for_poc: economic-gate-needed`
+
+The vuln-hunter enum has three values: `yes`, `no`,
+`economic-gate-needed` (see `agents/vuln-hunter.md` § Field-level
+rules). When a candidate arrives with `economic-gate-needed`,
+vuln-hunter is telling you EXPLICITLY that the Economic falsifier
+(Check 1 below) is borderline and needs your verdict, not theirs.
+
+For these candidates:
+
+- Treat Check 1 (Attacker P/L) as load-bearing. The triager verdict
+  must EXPLICITLY pass or fail Check 1; "borderline" is not allowed.
+- If `attacker_profit_usd <= attacker_cost_usd` and
+  `pure_grief_motive == none`, the default verdict is REJECT with
+  Economic falsifier citation.
+- If a credible griefer motive is documented AND the victim_loss
+  asymmetry clears the bounty's grief threshold, AFFIRM is allowed
+  but you MUST cite the asymmetry numerically.
+- DOWNGRADE is allowed when the math marginally passes but
+  precondition probabilities are weak (`P_reach < 0.10`).
+
+Candidates with `recommended_for_poc: yes` may still receive REJECT
+on Economic grounds; the difference is just the strength of the
+prior signal from vuln-hunter.
 
 ## The five mandatory checks
 
