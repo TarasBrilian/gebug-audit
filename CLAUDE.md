@@ -162,8 +162,8 @@ add a `# Changelog` section to the relevant `README.md`.
 Run before pushing:
 
 ```bash
-# 1. No em dashes
-! grep -rl '-' skills/ README.md CLAUDE.md
+# 1. No em dashes (matches the actual em-dash codepoint U+2014, not a hyphen)
+! grep -rl "$(printf '\xe2\x80\x94')" skills/ README.md CLAUDE.md
 
 # 2. SKILL.md frontmatter valid
 for f in skills/*/SKILL.md; do
