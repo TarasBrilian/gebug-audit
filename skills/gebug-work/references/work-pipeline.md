@@ -125,16 +125,66 @@ Read `DEFINITION.md` header. If `source_commit` differs from
 `git -C "$TARGET_REPO" rev-parse HEAD`, ask the user whether to:
 
 - (a) rebrainstorm first,
-- (b) run in DIFF-FOCUSED mode against changed files only (prioritize
-      vuln-hunter coverage on the changed files and any function whose
-      call-graph touches them; note previously-cleared areas so you do
-      not re-spend the full budget on unchanged code), or
+- (b) run in DIFF-FOCUSED mode (see § Diff-focused mode below), or
 - (c) continue anyway.
 
 Read the list of attack-vector docs from `DEFINITION.md` under
 "Attack-vector docs to load". Verify each exists in
 `<this-skill>/references/attack-vectors/`. If any is missing, name it
 and stop.
+
+### Diff-focused mode
+
+Use when the user picked option (b) above: a previous gebug-audit ran
+against `source_commit_old`, the protocol has since shipped new code at
+`HEAD`, and re-running the full pipeline against unchanged code wastes
+budget. The mode is opt-in only; default to full coverage.
+
+Setup:
+
+```bash
+OLD_COMMIT=$(grep -E '^source_commit:' "$DEFINITION_DIR/DEFINITION.md" | awk '{print $2}')
+NEW_COMMIT=$(git -C "$TARGET_REPO" rev-parse HEAD)
+CHANGED_FILES=$(git -C "$TARGET_REPO" diff --name-only "$OLD_COMMIT" "$NEW_COMMIT" -- '*.sol' '*.vy')
+echo "$CHANGED_FILES" > "$SCRATCH_DIR/diff-changed-files.txt"
+```
+
+Scope subsetting:
+
+- Cross-reference `CHANGED_FILES` against the `DEFINITION.md` in-scope
+  list. Files outside the in-scope list are ignored.
+- Build the call-graph blast radius: any in-scope function whose source
+  AST touches a changed function (caller or callee, one hop) is also
+  in-scope for this run. Save the list to
+  `$SCRATCH_DIR/diff-blast-radius.txt`.
+- All other in-scope code is marked `previously-cleared` and excluded
+  from Phase 4. Record the SHA-256 of each excluded file at
+  `$OLD_COMMIT` so a future diff can detect tampering.
+
+Phase deltas vs full-run:
+
+- Phase 1 (Slither): run against the full project as usual (cheap;
+  detector context helps).
+- Phase 2 (Fuzzing): run ONLY harnesses whose target function appears
+  in `diff-blast-radius.txt`. Other harnesses copy their last result
+  forward from the prior run if `$AUDIT_DIR/fuzzing/` already has one.
+- Phase 4: spawn vuln-hunter agents ONLY for subsystems in the blast
+  radius. The token-budget gate in Phase 4b applies to the reduced
+  count.
+- Phase 6, 6.5, 7: candidates from the prior run that did NOT survive
+  remain rejected; do not retry them unless the changed code plausibly
+  unlocks them. New candidates from the diff flow through normally.
+- Phase 9 (REPORT): add a "Diff audit" section listing the old commit,
+  new commit, changed files, blast radius, and previously-cleared
+  areas with their hashes. State explicitly that previously-cleared
+  code was NOT re-examined this run.
+
+Exit conditions:
+
+- If `CHANGED_FILES` is empty: nothing to audit. Print this and exit.
+- If `CHANGED_FILES` includes a file NOT covered by the prior audit
+  (out-of-scope-then, in-scope-now): refuse diff mode and require
+  rebrainstorm. Mixed-coverage diff audits hide gaps.
 
 ## PHASE 1: Static analysis
 
