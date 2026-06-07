@@ -174,6 +174,9 @@ done
 for f in skills/gebug-work/references/attack-vectors/*.md; do
   grep -q '^## Reachability check' "$f" || echo "MISSING REACHABILITY CHECK: $f"
 done
+
+# 4. Output-layout subtree names are consistent across the 9 sync files
+./scripts/check-layout-sync.sh
 ```
 
 ## Out of scope for this repo
