@@ -710,7 +710,7 @@ note this in `REPORT.md`.
 
 For each PASSING PoC, write one file under
 `$FINDING_DIR/{SEVERITY}_{slug}.md` using the Finding Template from
-`SKILL.md`.
+`references/finding-template.md` (load on demand).
 
 Reference the per-finding PoC by relative path
 (`report/POC/<slug>/Exploit.t.sol`) and the reproduce script
