@@ -39,13 +39,26 @@ When editing files in this repo:
 ## Where things live
 
 ```
-skills/<skill-name>/
-├── SKILL.md                 trigger + safety + doctrine (loaded first by Claude Code)
-├── README.md                end-user install + usage
-├── agents/                  bundled subagent definitions (gebug-work only)
-└── references/              loaded on demand from SKILL.md
-    ├── *-pipeline.md        phase-by-phase execution authority
-    └── attack-vectors/      EVM domain catalogs (gebug-work only)
+gebug-audit/
+├── README.md / CLAUDE.md / CONTRIBUTING.md / LICENSE
+├── install.sh / uninstall.sh
+├── assets/                       logo.png
+├── scripts/                      repo-level tooling (not shipped with the skills)
+│   └── check-layout-sync.sh      pre-commit guard for output-tree drift
+├── tests/
+│   └── fixtures/
+│       └── vulnerable-vault/     manual regression target (Foundry, Scenario B)
+└── skills/<skill-name>/
+    ├── SKILL.md                  trigger + safety + doctrine (loaded first by Claude Code)
+    ├── README.md                 end-user install + usage
+    ├── agents/                   bundled subagent definitions (gebug-work only)
+    │   ├── vuln-hunter.md        spawned per subsystem in Phase 4
+    │   ├── skeptical-triager.md  spawned in Phase 6.5 (Economic + Defender falsifiers)
+    │   └── exploit-writer.md     spawned per surviving candidate in Phase 7
+    └── references/               loaded on demand from SKILL.md
+        ├── *-pipeline.md         phase-by-phase execution authority
+        ├── finding-template.md   per-finding file template (gebug-work, loaded in Phase 8)
+        └── attack-vectors/       EVM domain catalogs (gebug-work only)
 ```
 
 ### SKILL.md vs references

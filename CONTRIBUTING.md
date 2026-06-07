@@ -36,8 +36,11 @@ the code and docs are held to.
 - **Improvements to the validity gate or severity calibration.** Real
   audits that revealed a flaw in the current rejection-only-with-proof
   rule.
-- **New focused modes** for `/gebug-work` that match common workflows
-  (e.g., a `diff-audit` mode that focuses on changed files only).
+- **New focused modes** for `/gebug-work` that match common workflows.
+  The existing modes are `audit-only`, `exploit-only`, `fork-test`,
+  `triage`, `report-only`, and the opt-in `diff-focused` mode for repeat
+  audits against a moved `source_commit` (see
+  `skills/gebug-work/references/work-pipeline.md` § Diff-focused mode).
 - **Bug reports from real audits** where the pipeline missed something.
   A reproducible miss is the most valuable feedback this project can
   receive.
@@ -59,14 +62,19 @@ the code and docs are held to.
 
 ```
 gebug-audit/
-├── README.md             project overview
-├── CLAUDE.md             instructions for Claude Code in this repo
-├── CONTRIBUTING.md       this file
-├── LICENSE               MIT
-├── install.sh            symlink installer
+├── README.md                 project overview
+├── CLAUDE.md                 instructions for Claude Code in this repo
+├── CONTRIBUTING.md           this file
+├── LICENSE                   MIT
+├── install.sh                symlink installer
 ├── uninstall.sh
 ├── assets/
 │   └── logo.png
+├── scripts/
+│   └── check-layout-sync.sh  pre-commit guard against output-tree drift
+├── tests/
+│   └── fixtures/
+│       └── vulnerable-vault/ regression target for end-to-end runs
 └── skills/
     ├── gebug-brainstorm/
     │   ├── SKILL.md
@@ -78,9 +86,11 @@ gebug-audit/
         ├── README.md
         ├── agents/
         │   ├── vuln-hunter.md
+        │   ├── skeptical-triager.md
         │   └── exploit-writer.md
         └── references/
             ├── work-pipeline.md
+            ├── finding-template.md
             └── attack-vectors/
                 ├── amm.md
                 ├── bridge.md
@@ -174,11 +184,19 @@ There is no separate build step.
 
 To test a change end-to-end:
 
-1. Pick a small open-source EVM protocol or a deliberately vulnerable
+1. Pick a target. For a fast, in-repo regression check, use the bundled
+   fixture at `tests/fixtures/vulnerable-vault/` (a minimal Foundry
+   project with a known first-supplier share-inflation bug; see its
+   `README.md` for the expected findings). For a broader smoke test,
+   pick a small open-source EVM protocol or a deliberately vulnerable
    target (Damn Vulnerable DeFi).
-2. Run `/gebug-brainstorm` from inside that project.
+2. Run `/gebug-brainstorm` from inside that project. Confirm it
+   auto-detects the correct scenario (Scenario B for the bundled
+   fixture, since it has `foundry.toml` + `src/` + `test/`).
 3. Run `/gebug-work`.
-4. Compare the output to what you expected. File an issue or open a PR
+4. Compare the output to what you expected. For the bundled fixture,
+   the pipeline MUST surface at least one finding mapped to
+   `lending.md` L1.x citing `src/Vault.sol`. File an issue or open a PR
    with the delta.
 
 ## Pre-commit checks
@@ -186,8 +204,10 @@ To test a change end-to-end:
 Before pushing, run:
 
 ```bash
-# 1. No em dashes anywhere.
-! grep -rl '-' skills/ README.md CLAUDE.md CONTRIBUTING.md
+# 1. No em dashes anywhere. Match the actual em-dash codepoint (U+2014),
+#    NOT a regular hyphen. A bare grep for '-' would match every hyphen
+#    in the repo and is useless.
+! grep -rl "$(printf '\xe2\x80\x94')" skills/ README.md CLAUDE.md CONTRIBUTING.md
 
 # 2. SKILL.md frontmatter valid.
 for f in skills/*/SKILL.md; do
@@ -199,7 +219,10 @@ for f in skills/gebug-work/references/attack-vectors/*.md; do
   grep -q '^## Reachability check' "$f" || echo "MISSING REACHABILITY CHECK: $f"
 done
 
-# 4. No non-English prose slipped in. Edit the WORDLIST locally to match
+# 4. Output-layout subtree names are consistent across the 9 sync files.
+./scripts/check-layout-sync.sh
+
+# 5. No non-English prose slipped in. Edit the WORDLIST locally to match
 #    whatever language the previous author was likely typing in.
 WORDLIST='\b(yan'g'|tida'k'|denga'n'|untu'k')\b'
 ! grep -rEn "$WORDLIST" skills/ README.md CLAUDE.md
