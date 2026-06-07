@@ -258,7 +258,8 @@ Before writing the closing message:
    used in `DEFINITION.md` against the cloned source.
 3. Confirm `BOUNTY_MATRIX.md` text is byte-identical to the bounty page
    (or note exactly what was paraphrased).
-4. Confirm no em dash characters in any written file:
-   `! grep -l '-' <target-repo>/docs/gebug-audit/definition/*.md`.
+4. Confirm no em dash characters in any written file. The pattern is
+   the actual em-dash codepoint (U+2014), not a regular hyphen:
+   `! grep -rl "$(printf '\xe2\x80\x94')" <target-repo>/[docs/]gebug-audit/definition/`.
 5. State `all cites verified` in the closing message, or list exactly what
    could not be verified and why.

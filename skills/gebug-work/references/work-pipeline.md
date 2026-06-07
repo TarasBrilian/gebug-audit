@@ -327,12 +327,86 @@ Wait for all agents to complete. Collect the union of candidates, do NOT
 pre-dedup (Phase 6 dedups). Two agents finding the same candidate
 independently is a confidence boost.
 
-### 4d. Anti-dismissal
+### 4c-validate. Schema-check every vuln-hunter output
 
-If all spawned agents return "no candidates", re-spawn at least one with
-stricter framing quoting the rejection-only-with-proof rule from
-`agents/vuln-hunter.md`. Unanimous "no findings" is a signal the agent
-prompts are biased; fix that, do not accept it as the audit result.
+Before any candidate flows into Phase 5/6/6.5, parse and validate the
+YAML block defined in `agents/vuln-hunter.md` § Output format. The
+downstream phases READ fields by key, so a missing or mis-typed field
+silently breaks Phase 6.5's falsifier checks and Phase 8's severity
+recalibration.
+
+Save each agent's raw YAML to `$SCRATCH_DIR/vh-<agent-id>.yaml`, then:
+
+```bash
+# Minimal validator. Requires: python3 + python3-yaml (pip install pyyaml).
+python3 - <<'PY' "$SCRATCH_DIR"/vh-*.yaml
+import sys, yaml, pathlib
+
+REQUIRED_PER_CAND = ["title", "severity_hypothesis", "confidence_0_100",
+    "contract", "citations", "root_cause", "attack_path", "preconditions",
+    "single_strongest_doubt", "cheapest_falsifier",
+    "in_scope_impact_mapping", "domain_attack_class",
+    "slither_cross_ref", "recommended_for_poc"]
+
+# These six fields are required ONLY when severity_hypothesis is
+# Critical/High/Medium. Low/Info candidates may omit them.
+REQUIRED_FOR_MEDIUM_PLUS = ["precondition_probabilities",
+    "attacker_cost_usd", "attacker_profit_usd", "pure_grief_motive",
+    "protocol_tvl_required_usd", "defender_response_time_estimate"]
+
+MEDIUM_PLUS = {"Critical", "High", "Medium"}
+fail = 0
+for path in sys.argv[1:]:
+    doc = yaml.safe_load(pathlib.Path(path).read_text())
+    if not isinstance(doc, dict) or "candidates" not in doc:
+        print(f"INVALID: {path} - missing top-level `candidates`"); fail += 1; continue
+    cands = doc["candidates"]
+    if cands == [] and "honest_negative_result" not in doc:
+        print(f"INVALID: {path} - empty candidates without honest_negative_result"); fail += 1; continue
+    for i, c in enumerate(cands):
+        for k in REQUIRED_PER_CAND:
+            if k not in c:
+                print(f"INVALID: {path} cand[{i}] missing {k}"); fail += 1
+        if c.get("severity_hypothesis") in MEDIUM_PLUS:
+            for k in REQUIRED_FOR_MEDIUM_PLUS:
+                if k not in c:
+                    print(f"INVALID: {path} cand[{i}] ({c.get('title')}) MEDIUM+ missing {k}"); fail += 1
+sys.exit(1 if fail else 0)
+PY
+```
+
+If validation fails for ANY agent, re-spawn THAT agent with stricter
+framing quoting `agents/vuln-hunter.md` § Output format. Do NOT
+hand-patch missing fields - the agent must produce them so the
+provenance is traceable. After two re-spawns of the same agent without
+success, fall back: take the candidates that DID validate, mark the
+failing subsystem `subsystem_skipped_due_to_schema_failure` in the
+working ledger, and continue. The `REPORT.md` Honest Negative Result
+section MUST surface skipped subsystems explicitly.
+
+### 4d. Anti-dismissal AND anti-pile-on (symmetric)
+
+If all spawned agents return "no candidates", the orchestrator MUST
+investigate WHY before re-spawning. Two scenarios:
+
+- **Genuine clean codebase**: the protocol is well-defended and the
+  in-scope contracts have been audited multiple times. Honest negative
+  result is the correct outcome - proceed to Phase 5 / 6 with empty
+  candidate pool and let Phase 11 produce an honest-negative report.
+- **Biased agent prompts**: the prompts under-specified attack vectors,
+  missed subsystem boundaries, or excluded relevant attack-vector docs.
+  Symptom: a different reviewer would surface candidates the agents
+  missed. In this case re-spawn with stricter framing quoting the
+  rejection-only-with-proof rule from `agents/vuln-hunter.md`.
+
+You may NOT re-spawn just because the audit "feels empty". Re-spawn
+only when you can name (a) specific attack vectors the agents skipped
+or (b) specific subsystems with > 300 LoC that received zero candidates.
+
+This is symmetric with the anti-pile-on rule in `agents/skeptical-triager.md`
+(Phase 6.5): just as unanimous "all High" suggests vuln-hunter bias,
+unanimous "no candidates" can be honest. Do not force findings to
+appear; let the pipeline speak.
 
 ## PHASE 5: Cross-contract analysis
 
@@ -390,13 +464,12 @@ vuln-hunter agents, cross-contract analysis. Deduplicate (same root
 cause = one candidate).
 
 **PoC is the falsifier, NOT this phase.** Candidates with
-`recommended_for_poc = yes` flow to Phase 7. This phase only applies
-rejections that meet the rejection-only-with-proof rule:
-
-1. Code-path falsifier with `file:line` of the blocking check.
-2. Math falsifier with symbol-by-symbol derivation.
-3. State falsifier with on-chain `cast` read at the audit fork block.
-4. Bounty falsifier quoting exclusion language from `BOUNTY_MATRIX.md`.
+`recommended_for_poc = yes` flow to Phase 7. Candidates with
+`recommended_for_poc = economic-gate-needed` are flagged for
+skeptical-triager review in Phase 6.5 below. This phase only applies
+rejections that meet the rejection-only-with-proof rule (the SIX
+quantified falsifier types - see `agents/vuln-hunter.md` § Rejection-only-
+with-proof rule for full definitions).
 
 Doubts are NOT rejections. Record doubts in each candidate's
 `single_strongest_doubt` field and let PoC empirically falsify.
@@ -431,10 +504,126 @@ cross-venue oracle attacks with cost / value asymmetry are vulns.
 - Is the behavior intentional design?
 - Would a dev fix the code or the docs?
 
-Candidates that survive flow to Phase 7. Write a working ledger to
-scratch (`$AUDIT_DIR/_candidates_working.md`) listing each candidate's
-status. Do NOT write findings yet; findings are only written after PoC
-in Phase 8.
+Candidates that survive flow to Phase 6.5. Write the working ledger to
+`$AUDIT_DIR/_candidates_working.md` (template below) and keep it
+appended-to through Phases 6, 6.5, 7, and 8. Do NOT write findings yet;
+findings are only written after PoC in Phase 8.
+
+### Working ledger template (`_candidates_working.md`)
+
+This file is the single source of truth that the orchestrator and the
+spawned skeptical-triager / exploit-writer agents read to decide what
+flows where. Without a deterministic format, each phase re-parses ad-hoc
+prose and silently drops candidates - the symptom is "findings missing
+in REPORT.md even though vuln-hunter surfaced them in scratch". The
+file is gitignored via `$AUDIT_DIR/.gitignore`.
+
+Initial structure (Phase 6 writes this; later phases append columns,
+verdict blocks, and severity updates):
+
+````markdown
+# Working ledger (gebug-audit)
+
+Updated continuously from Phase 6 through Phase 8. Each candidate has
+ONE row; status moves left to right as phases complete. Phase 6 fills
+columns id..phase6_status. Phase 6.5 fills triager_verdict. Phase 7
+fills poc_status. Phase 8 fills final_severity and finding_file.
+
+| id | slug | title | source | severity_hypothesis | phase6_status | triager_verdict | poc_status | final_severity | finding_file |
+|----|------|-------|--------|---------------------|----------------|------------------|------------|----------------|--------------|
+| C1 | first-supplier-htoken-inflation | First-supplier hToken inflation | brainstorm | Critical | KEEP | AFFIRM | PASSING | Critical | finding/CRITICAL_first-supplier-htoken-inflation.md |
+| C2 | oracle-staleness | Stale Chainlink round accepted | vuln-hunter:vault | High | KEEP | DOWNGRADE Medium | PASSING | Medium | finding/MEDIUM_oracle-staleness.md |
+| C3 | admin-key-loss | Admin key loss bricks vault | slither | Medium | REJECTED | n/a | n/a | n/a | (see rejection citation below) |
+
+## Source legend
+
+- `brainstorm`: from `definition/CANDIDATES.md`.
+- `vuln-hunter:<subsystem>`: produced by a Phase 4 agent.
+- `slither` / `aderyn` / `echidna` / `halmos`: surfaced by Phase 1 / 2.
+- `cross-contract`: produced by Phase 5.
+
+## phase6_status legend
+
+- `KEEP`: passes rejection-only-with-proof. Flows to Phase 6.5.
+- `REJECTED`: one of the SIX QUANTIFIED falsifiers fires; cite below
+  under `## C<id> rejection`.
+- `DEDUPED_TO_<id>`: same root cause as an earlier candidate.
+
+## triager_verdict legend (Phase 6.5)
+
+- `AFFIRM`: severity stands.
+- `DOWNGRADE <tier>`: severity capped; falsifier cited in the
+  skeptical-triager output saved at `_scratch/triager-<id>.md`.
+- `REJECT`: dropped; falsifier cited.
+- `n/a`: LOW / Info candidates skip Phase 6.5.
+
+## poc_status legend (Phase 7)
+
+`PASSING`, `FAILED`, `INVALID`, `NOT_BUILT` (per `agents/exploit-writer.md`).
+
+## final_severity legend (Phase 8)
+
+Re-derived from the PoC's measured numbers; capped by the triager
+verdict. Never carried forward unchanged from `severity_hypothesis`.
+
+## Per-candidate rejection / downgrade citations
+
+For every REJECTED or DOWNGRADE row, add a block here. Example:
+
+### C3 rejection
+- **Falsifier:** Code-path (#1 of six in `agents/vuln-hunter.md`).
+- **Citation:** `Vault.sol:L412-L419` - `emergencyWithdraw()` already
+  on-chain, so the "permanent freezing" bounty line does not apply.
+- **Reviewer:** Phase 6 orchestrator after slither cross-reference.
+````
+
+The orchestrator updates this file IN PLACE between phases; do not
+rewrite it from scratch per phase. Spawned agents that need to read
+candidate state (skeptical-triager, exploit-writer) take this file path
+as input rather than re-parsing CANDIDATES.md.
+
+## PHASE 6.5: Skeptical-triager pass
+
+Independent realism filter. Counters the vuln-hunter agents' built-in
+bias toward surfacing candidates by spawning a separate agent whose
+mandate is to REJECT using the Economic + Defender falsifiers
+(falsifiers #5 and #6 in `agents/vuln-hunter.md`).
+
+Trigger: every candidate with `severity_hypothesis` in
+{Critical, High, Medium} AND `recommended_for_poc` in
+{yes, economic-gate-needed} flows through this phase.
+
+For each such candidate, spawn one `skeptical-triager` agent (see
+`agents/skeptical-triager.md`). Each agent receives:
+
+- The candidate's full vuln-hunter output (including the mandatory
+  economic + defender fields).
+- `DEFINITION.md` (especially "Defense Inventory" section) and
+  `BOUNTY_MATRIX.md`.
+- Current on-chain state snapshot saved to `_scratch/onchain-state.md`
+  (TVL, reserve, recent admin activity).
+
+The agent returns one of:
+
+- **AFFIRM** - severity stands. Candidate proceeds to Phase 7 at the
+  vuln-hunter's proposed severity.
+- **DOWNGRADE <new_severity>** - severity capped at `<new_severity>`
+  with cited Economic or Defender reasoning. Candidate proceeds to
+  Phase 7 at the capped severity.
+- **REJECT** - candidate dropped. Citation MUST quote one of the six
+  falsifiers from `agents/vuln-hunter.md`. Hand-wavy rejections are
+  inadmissible here too.
+
+Record each verdict in `_candidates_working.md` with the citation. If
+vuln-hunter and skeptical-triager disagree, the FINAL `REPORT.md` must
+present both views side-by-side.
+
+**Anti-pile-on rule**: if skeptical-triager REJECTS more than 50% of
+MEDIUM+ candidates, the orchestrator MUST re-spawn the triager once with
+stricter framing quoting BOTH the Anti-rejection rule AND the
+Anti-pile-on rule. Unanimous rejection across many candidates may
+indicate triager bias toward "no findings" - symmetric to the
+vuln-hunter anti-dismissal rule.
 
 ## PHASE 7: PoC development and validation
 
@@ -452,60 +641,19 @@ Each agent receives:
 - Path to write the PoC: `$POC_DIR/<slug>/Exploit.t.sol`.
 - Sibling reproduce script path: `$POC_DIR/<slug>/reproduce.sh`.
 
-### Foundry template
+### Foundry template + reproduce.sh template
 
-```solidity
-// SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
-import "forge-std/Test.sol";
+The canonical PoC template (3 variants: profit / grief / invariant-breach)
+and the reproduce.sh template live in `agents/exploit-writer.md` (§ EVM
+template, § reproduce.sh template, § Hard rules). DO NOT duplicate them
+here. The exploit-writer agent will produce a PoC that conforms to those
+templates including:
 
-contract Exploit_<slug> is Test {
-    address attacker;
-    function setUp() public {
-        // Pick the fork that matches deployment status:
-        //   - Deployed on mainnet of chain X → vm.createSelectFork("X", BLOCK)
-        //   - Testnet only → vm.createSelectFork("X-testnet", BLOCK)
-        //   - Not yet deployed → no fork, deploy from source
-        vm.createSelectFork("mainnet", 19_200_000);
-        attacker = makeAddr("attacker");
-        vm.deal(attacker, 1_000_000 ether);
-    }
-    function testExploit() public {
-        vm.startPrank(attacker);
-        uint256 before = attacker.balance;
-        // === EXPLOIT STEPS ===
-        uint256 afterBal = attacker.balance;
-        vm.stopPrank();
-        assertGt(afterBal, before, "Exploit should be profitable");
-        emit log_named_decimal_uint("Profit", afterBal - before, 18);
-    }
-}
-```
-
-Rules:
-
-- Mainnet fork only (or matching testnet if the contract is only there).
-  Pin the block.
-- `vm.deal()` funding. NEVER a real private key.
-- `vm.prank` / `startPrank` for impersonation. `vm.label()` every named
-  address.
-- Implement flash-loan callbacks if used.
-- Assert BOTH that the call succeeds AND that profit / impact occurred.
-  A PoC that proves only "the call did not revert" is not a PoC.
-
-### reproduce.sh template
-
-```bash
-#!/usr/bin/env bash
-# Reproduce <slug>: run from the project root.
-set -euo pipefail
-forge test \
-  --match-path docs/gebug-audit/report/POC/<slug>/Exploit.t.sol \
-  --match-test testExploit \
-  -vvvv
-```
-
-Make it executable: `chmod +x $POC_DIR/<slug>/reproduce.sh`.
+- Mandatory profit-required assertion (variant A) OR documented-grief
+  asymmetry assertion (variant B) OR named-invariant breach (variant C).
+- Mandatory realistic-state requirement (initial TVL >=
+  100x bounty de-minimis OR live mainnet fork).
+- Mandatory mainnet-fork-only constraint, pinned block, no real keys.
 
 ### Validation outcomes
 
@@ -545,6 +693,29 @@ Paste the actual forge PASS output (truncate to the relevant lines).
 Cross-link related findings (e.g., shared root cause across two
 contracts) at the bottom of each finding's "References" section.
 
+### Severity recalibration (mandatory)
+
+The severity written in `{SEVERITY}_{slug}.md` MUST be RE-DERIVED from
+the PoC's MEASURED outputs, not carried forward from the vuln-hunter's
+`severity_hypothesis`. Specifically:
+
+1. Read the PoC's logged `net attacker P/L`, `victim loss`, or
+   invariant-breach magnitude. Use the ACTUAL numbers, not the
+   pre-PoC estimate.
+2. Apply the skeptical-triager's verdict from Phase 6.5 as a CEILING.
+   You may only set severity at or below the triager's downgrade.
+3. Apply the Severity Calibration checklist in `SKILL.md` (sections
+   A - F) ONCE MORE using the post-PoC numbers.
+4. If the PoC's measured impact does NOT meet the bounty matrix line
+   the candidate originally mapped to, REMAP to the highest line that
+   the measured impact does meet. If no line matches, severity caps
+   at LOW with `would_submit_to_bounty: no`.
+
+The "do not pre-downgrade" rule in `SKILL.md` Severity Calibration
+applies to the WORK PHASE (before PoC). After PoC, evidence-based
+re-derivation is REQUIRED. These are complementary, not contradictory:
+do not soften without evidence; do harden / adjust with evidence.
+
 ## PHASE 9: Write the headline report
 
 `$REPORT_DIR/REPORT.md`:
@@ -561,8 +732,20 @@ contracts) at the bottom of each finding's "References" section.
 ## Executive summary
 
 - Scope: N contracts, M total LoC.
-- Findings: Critical: c, High: h, Medium: m, Low: l, Info: i.
-- Submittable (confidence >= 60, no gate failures): K.
+- **Raw findings produced by vuln-hunter**: c+h+m+l+i.
+- **Findings surviving skeptical-triager (Phase 6.5)**: K1.
+- **Findings surviving PoC severity recalibration (Phase 8)**: K2.
+- **Findings recommended for bounty submission**: K3.
+  - = candidates with `would_submit_to_bounty: yes`
+    AND `triager_reject_probability < 30%`
+    AND `poc_status: PASSING`.
+- **Headline exploit attacker P/L**: $X (positive = real exploit,
+  negative = grief with documented motive, zero = invariant-breach
+  with no direct extraction).
+
+Honesty discipline: if K3 = 0, the executive summary MUST emphasize
+that as a positive defense-in-depth outcome. Do not inflate K3 by
+relaxing the gates.
 
 ## Scope
 
@@ -607,7 +790,7 @@ All file:line citations and contract / function names were grep-verified
 against the source at commit abc1234.
 ```
 
-## PHASE 10: Final anti-hallucination check
+## PHASE 10: Final anti-hallucination check + dramatic-phrasing linter
 
 ```bash
 # 1. Citations
@@ -618,13 +801,41 @@ for f in "$FINDING_DIR"/*.md; do
   done
 done
 
-# 2. Em dashes
-! grep -rl '-' "$AUDIT_DIR/"
+# 2. Em dashes (U+2014). The pattern is built via printf so the
+#    skill source itself does not contain a literal em-dash.
+EM_DASH=$(printf '\xe2\x80\x94')
+! grep -rl "$EM_DASH" "$AUDIT_DIR/"
 
 # 3. PoC smoke run
 for poc in "$POC_DIR"/*/reproduce.sh; do
   test -x "$poc" || echo "NOT EXECUTABLE: $poc"
 done
+
+# 4. Dramatic-phrasing linter (NEW)
+#    Phrases that trigger review: they sound severe but rarely carry
+#    quantification. Each hit must be either quantified or removed.
+for phrase in \
+  "becomes un-updateable" \
+  "persistent leakage" \
+  "indefinite freeze" \
+  "indefinite delay" \
+  "bricked state" \
+  "destroyed protocol" \
+  "catastrophic loss" \
+  "complete denial of service"; do
+  grep -nH "$phrase" "$FINDING_DIR"/*.md && echo "DRAMATIC PHRASE in $f: $phrase"
+done
+
+# Each hit MUST be replaced with a quantified statement:
+#   "becomes un-updateable" -> "all updates revert until <state X> is restored,
+#                              which requires <Y action> taking <Z time>"
+#   "persistent leakage" -> "Junior loses $A per block until <Y action>"
+#   "indefinite freeze" -> "freezes for <T> hours/days until <admin/timelock>"
+#   "bricked state" -> "<entrypoint X> reverts; the admin escape is <Y>
+#                       which takes <Z time>"
+#
+# If a hit cannot be quantified, the underlying finding is likely an
+# already-dead or trivial-precondition case - revisit Phase 6.5 verdict.
 
 # 4. Required files present
 for required in \

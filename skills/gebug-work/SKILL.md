@@ -232,29 +232,48 @@ Before starting:
 
 ## Full Work Flow
 
-Load `references/work-pipeline.md` and execute every phase. Summary:
+Load `references/work-pipeline.md` and execute every phase. The
+nomenclature below mirrors `work-pipeline.md` exactly so cross-references
+between this file, the agent specs, and the pipeline never drift.
 
-1. Tool pre-flight (full toolchain: forge, cast, anvil, slither, optional
-   aderyn / echidna / medusa / halmos).
-2. Re-validate definition inputs (the pre-check above).
-3. Full static analysis. Slither with targeted detectors + optional
-   second engine. Outputs land in `report/slither-*.txt`.
-4. Fuzzing / invariants / Halmos symbolic on math-bearing paths. Outputs
-   land in `fuzzing/`. Save `INVARIANTS.md` to `report/`.
-5. Parallel deep analysis via spawned `vuln-hunter` agents. Subsystem
-   split decided in Phase 4 prelude.
-6. Cross-contract and economic analysis.
-7. Compile candidates. Apply rejection-only-with-proof rule. Anything not
-   rejected with proof flows to PoC. Doubts are recorded, not used to
-   reject.
-8. PoC development per surviving candidate via spawned `exploit-writer`
-   agents. Mainnet fork only. PASS / FAIL / INVALID for each.
-9. Write per-finding files in `finding/`. Write `report/POC/<slug>/`
-   bundles per finding. Write `exploit/Exploit.sol` for the headline.
-10. Write `report/REPORT.md`, `report/INVARIANTS.md`, and
-    `fuzzing/FUZZING.md`.
-11. Final anti-hallucination check.
-12. Summary to user.
+- **Phase -1**: Tool pre-flight (full toolchain: forge, cast, anvil,
+  slither; optional aderyn, echidna, medusa, halmos).
+- **Phase 0**: Re-validate the four `definition/` files and resolve
+  `$AUDIT_DIR` per Scenario A vs B (re-running brainstorm's detection).
+- **Phase 1**: Full static analysis. Slither with targeted detectors,
+  optional aderyn pass. Outputs land in `report/slither-*.txt`.
+- **Phase 2**: Fuzzing / invariants / Halmos symbolic on math-bearing
+  paths. Outputs land in `fuzzing/`. Save `INVARIANTS.md` to `report/`.
+- **Phase 3**: Re-read in-scope contracts with the adversarial stance;
+  feed observations into the candidate pool. Read every external
+  integration's source, not just the interface.
+- **Phase 4**: Parallel deep analysis via spawned `vuln-hunter` agents.
+  Subsystem split decided in the Phase 4 prelude. Each agent's output
+  MUST satisfy the YAML schema in `agents/vuln-hunter.md` § Output
+  format; the orchestrator validates required fields before Phase 6.5
+  and re-spawns on schema failure.
+- **Phase 5**: Cross-contract and economic analysis (trust boundaries,
+  shared accounting, upgrade-path races, MEV / ordering,
+  cross-contract reentrancy).
+- **Phase 6**: Compile candidates. Apply rejection-only-with-proof rule
+  (six falsifiers). Doubts are recorded, not used to reject. Write the
+  working ledger to `$AUDIT_DIR/_candidates_working.md` using the
+  template in `references/work-pipeline.md` § Phase 6.
+- **Phase 6.5**: Skeptical-triager pass over every MEDIUM+ candidate.
+  Returns AFFIRM / DOWNGRADE / REJECT citing Economic or Defender
+  falsifiers. See `agents/skeptical-triager.md`.
+- **Phase 7**: PoC development per surviving candidate via spawned
+  `exploit-writer` agents. Mainnet fork only. PASS / FAIL / INVALID per
+  candidate. Headline copy lands in `exploit/Exploit.sol`.
+- **Phase 8**: Write per-finding files in `finding/`. Severity is
+  RE-DERIVED from measured PoC outputs (see § Severity Calibration).
+  Write per-finding `report/POC/<slug>/` bundles.
+- **Phase 9**: Write `report/REPORT.md`, `report/INVARIANTS.md`,
+  `fuzzing/FUZZING.md`.
+- **Phase 10**: Final anti-hallucination check (citations grep, em-dash
+  linter, PoC smoke-run, dramatic-phrasing linter, required-files
+  presence).
+- **Phase 11**: Closing summary to the user with absolute paths.
 
 ### Phase 4 agent count rules (do not under-allocate)
 
@@ -308,9 +327,16 @@ carry only a `severity_hypothesis`.
   reasons exist" - provide the counter-argument and let the triager
   decide.
 
-Conservative-bias correction: write the finding, build the PoC, apply
-the matrix AS WRITTEN by the bounty, submit. The triager downgrades; you
-do not pre-downgrade.
+Conservative-bias correction (pre-PoC): write the finding, build the
+PoC, apply the matrix AS WRITTEN by the bounty. The triager downgrades;
+you do not pre-downgrade WITHOUT EVIDENCE.
+
+Post-PoC recalibration (REQUIRED, see work-pipeline.md Phase 8): once
+the PoC produces measured numbers, re-derive severity from those
+numbers using the same matrix. The skeptical-triager's Phase 6.5
+verdict is a CEILING - you may settle at or below it but never above.
+"Re-derive from evidence" and "do not pre-downgrade" are complementary:
+do not soften without evidence; do harden / adjust with evidence.
 
 ## Finding Template (per-finding file in `finding/`)
 
@@ -328,16 +354,26 @@ do not pre-downgrade.
 
 | field | value |
 |-------|-------|
-| `severity_post_gate` | Critical / High / Medium / Low / Info |
+| `severity_pre_poc` | vuln-hunter's `severity_hypothesis` |
+| `severity_post_triager` | skeptical-triager's Phase 6.5 verdict (AFFIRM / DOWNGRADE <tier> / REJECT) |
+| `severity_post_poc` | Critical / High / Medium / Low / Info, re-derived from measured PoC numbers |
 | `confidence_0_100` | integer |
 | `single_strongest_reject` | strongest rejection reason |
 | `smallest_falsifier` | cheapest test that proves the claim wrong |
 | `gate_failures` | failed validity gates or `none` |
 | `poc_status` | PASSING / NOT_BUILT / FAILED / N/A |
 | `poc_path` | report/POC/<slug>/Exploit.t.sol |
+| `measured_attacker_pl_usd` | net USD profit observed in PoC (negative = grief) |
+| `measured_victim_loss_usd` | USD loss for griefing variants |
+| `would_submit_to_bounty` | yes / no - honest self-assessment |
+| `triager_reject_probability` | 0-100% estimate that a bounty triager downgrades or rejects |
 
-If `confidence_0_100 < 60` or `gate_failures` is not `none`, the finding
-is NOT a recommended submission.
+If `confidence_0_100 < 60` OR `gate_failures` is not `none` OR
+`would_submit_to_bounty = no` OR `triager_reject_probability >= 30%`,
+the finding moves to the report's "Code-walk observations" section
+instead of the headline findings list. The orchestrator MUST honor
+these fields in `REPORT.md` Phase 9 executive summary - K3 (submittable
+count) is filtered by exactly this rule.
 
 ## Summary
 
@@ -427,8 +463,9 @@ Before sending the report:
    name used in the report.
 3. Remove or downgrade every claim that cannot be tied to code, math, a
    fork test, or explicit scope language.
-4. Confirm no em-dash characters in any written file:
-   `! grep -rl '-' "$AUDIT_DIR/"` (em-dash literal, not regular hyphen).
+4. Confirm no em-dash characters in any written file. Use the actual
+   em-dash codepoint (U+2014), not a regular hyphen:
+   `! grep -rl "$(printf '\xe2\x80\x94')" "$AUDIT_DIR/"`.
 5. Confirm every per-finding PoC has a matching `reproduce.sh` that runs
    the test (smoke-run it once if possible).
 6. State `all cites verified` in the closing summary, or list exactly

@@ -182,8 +182,31 @@ If anything is still unclear, ask up to 4 more:
    findings without PoC", "valid only if loss exceeds 1 ETH", L2 sequencer
    exclusions).
 
+### Batch 4: Defense inventory (required for realistic scoring)
+
+This batch feeds the skeptical-triager in /gebug-work Phase 6.5. Without
+it, every MEDIUM+ finding will be scored without defender context and
+will be inflated. Ask up to 4:
+
+1. **Current TVL** in USD. If the user does not know, plan to read it
+   on-chain in Phase 4 (see Phase 4 addendum). The TVL anchors the
+   bounty matrix's "Critical = > X% of TVL" thresholds.
+2. **Monitoring partners** - Hypernative / Forta / Tenderly / Chaos Labs
+   / custom. What do they alert on? Estimated response time
+   (minutes / hours / days)?
+3. **Guardian / pause / veto roles** - who can pause, how fast can they,
+   what they can pause. Are there cold-wallet signers? On-call rotation?
+4. **Timelock durations** per privileged action: OWNER, UPDATER_*,
+   RESERVE_MANAGER, etc. Plus the multisig threshold (e.g., 3/5, 2/3).
+   Historical response-to-incident time if known.
+
+If the user does not know defense details, mark `defense_inventory:
+incomplete` in DEFINITION.md. The skeptical-triager will refuse to apply
+the Defender falsifier without explicit citations, so missing context
+biases the audit TOWARD keeping findings (i.e., gracefully degrades).
+
 Do NOT pile on more questions. If something material is still missing
-after Batch 3, ask the single most important follow-up as free-form text
+after Batch 4, ask the single most important follow-up as free-form text
 rather than another structured batch.
 
 ## PHASE 2: Safety preflight
@@ -338,6 +361,34 @@ cast call <address> "implementation()(address)" --rpc-url <rpc>
 Read any provided existing audits. Pull the published findings into the
 "prior audits" section of `DEFINITION.md`.
 
+### Phase 4 addendum: on-chain economic context
+
+If the protocol is deployed, read live state via `cast` so the
+skeptical-triager in /gebug-work Phase 6.5 has real numbers to apply
+the Economic and Defender falsifiers. Save the output to
+`$SCRATCH_DIR/onchain-state.md`. Skip this addendum if the protocol is
+NOT yet deployed.
+
+```bash
+RPC=<choose from supported chains table>
+PIN_BLOCK=$(cast block-number --rpc-url $RPC)
+
+# 1. TVL anchor for "Critical = > X% of TVL" thresholds.
+cast call <accounting_or_vault_addr> "<tvl-getter>()(uint256)" --rpc-url $RPC --block $PIN_BLOCK
+
+# 2. Reserve balance for "admin can rescue" arguments.
+cast call <accounting_addr> "<reserve-getter>()(uint256)" --rpc-url $RPC --block $PIN_BLOCK
+
+# 3. Recent admin activity (gauge response cadence baseline).
+cast logs --from-block $((PIN_BLOCK - 100000)) --to-block $PIN_BLOCK <admin_addr> --rpc-url $RPC | head -20
+```
+
+Substitute the actual getters from the target protocol. Document in
+`onchain-state.md`: TVL in USD, reserve in USD, last 5 admin events with
+timestamps. These numbers feed the mandatory
+`attacker_cost_usd` / `attacker_profit_usd` / `protocol_tvl_required_usd`
+fields that vuln-hunter MUST populate in /gebug-work Phase 4 output.
+
 ## PHASE 5: Quick static pass (recon only)
 
 ```bash
@@ -435,15 +486,33 @@ Aim for breadth, not depth. The validity gate runs in the work phase.
 ### Anti-rejection rule
 
 A candidate is NOT rejected by "unlikely", "improbable", "users would
-not", or "admin would not". Reject only with one of:
+not", or "admin would not". The full doctrine is the SIX QUANTIFIED
+falsifiers defined in `gebug-work/agents/vuln-hunter.md` § Anti-rejection
+rule. Restated here so the brainstorm doctrine matches the work-phase
+doctrine byte-for-byte:
 
 1. Code-path falsifier with `file:line` of the blocking check.
 2. Math falsifier with symbol-by-symbol derivation showing attacker
    nets ≤ 0.
 3. State falsifier with on-chain `cast` read at the current block.
-4. Bounty falsifier quoting exact exclusion language from `BOUNTY_MATRIX.md`.
+4. Bounty falsifier quoting exact exclusion language from
+   `BOUNTY_MATRIX.md`.
+5. Economic falsifier with cited numeric `attacker_cost_usd` and
+   `attacker_profit_usd`, attacker rationally nets ≤ 0 USD AND no
+   `pure_grief_motive` applies. Defer to /gebug-work Phase 6.5 if the
+   numbers cannot be derived from on-chain reads alone.
+6. Defender falsifier citing a specific mechanism named in
+   `DEFINITION.md` "Defense Inventory" with response time shorter than
+   the attack window. Defer to /gebug-work Phase 6.5 if the defense
+   inventory is `incomplete`.
 
-Anything else: keep the candidate, let `/gebug-work` falsify with a PoC.
+Brainstorm bias is BREADTH. The cheapest position is "keep the
+candidate, let `/gebug-work` falsify with a PoC". Only invoke
+falsifiers 5 and 6 here when the data is already in hand and the
+verdict is unambiguous. Otherwise pass the candidate through and let
+skeptical-triager apply Economic + Defender in Phase 6.5.
+
+Anything else (hand-wavy "unlikely", "would not"): keep the candidate.
 
 ## PHASE 8: Write the four artefacts
 
@@ -482,6 +551,25 @@ paths. Funds flow: source → custody → strategy → user.
 
 - references/attack-vectors/lst-lrt.md
 - references/attack-vectors/oracle-integration.md
+
+## Defense Inventory
+
+Required by /gebug-work Phase 6.5 (skeptical-triager). Without this
+section, the Defender falsifier cannot fire and findings will be scored
+without defender context. If a row's value is unknown, write `unknown`
+explicitly - DO NOT guess.
+
+| Mechanism | Address / Role | Trigger | Response time | Notes |
+|-----------|----------------|---------|---------------|-------|
+| Current TVL (anchor for de-minimis) | n/a | n/a | n/a | $X at block Y |
+| Monitoring partner #1 | e.g. Hypernative | alert classes | minutes / hours | URL or contact |
+| Monitoring partner #2 | e.g. Forta | ... | ... | ... |
+| PAUSER multisig | 0x... (M-of-N) | what they can pause | est. minutes | on-call rotation? |
+| Guardian / veto | 0x... | what they can veto | hours / days | identity |
+| OWNER timelock | 0x... | privileged role | 48h | |
+| Lower-tier timelock | 0x... | UPDATER_STRAT etc. | 24h | |
+| Historical incident response | n/a | n/a | observed median | from public post-mortems |
+| `defense_inventory_complete` | n/a | n/a | n/a | yes / no |
 
 ## Prior audits
 
@@ -569,9 +657,12 @@ Before declaring done:
    ```bash
    grep -rE 'contract [A-Z][A-Za-z0-9_]+ ' <target-repo>/contracts/
    ```
-3. Confirm no em-dash characters:
+3. Confirm no em-dash characters. The pattern is the actual em-dash
+   codepoint (U+2014), built via `printf` so the skill file itself does
+   not contain a literal em-dash:
    ```bash
-   ! grep -l '-' "$DEFINITION_DIR/"*.md
+   EM_DASH=$(printf '\xe2\x80\x94')
+   ! grep -l "$EM_DASH" "$DEFINITION_DIR/"*.md
    ```
 4. If any check fails, fix the file before closing.
 
