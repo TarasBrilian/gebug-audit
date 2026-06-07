@@ -249,6 +249,34 @@ Write `$FUZZING_DIR/FUZZING.md`:
 Per-harness commentary. What each tested, what was learned, follow-ups.
 ```
 
+## PHASE 2 EXIT GATE: hard-check fuzzing artifacts
+
+Before Phase 3 can start, `$FUZZING_DIR/FUZZING.md` MUST exist. This
+mirrors the Phase 0 refusal for missing definition files: Phase 0
+refuses without scoping evidence; this gate refuses without fuzzing
+evidence. A silent Phase 2 skip is the most common way a real bug
+(broken invariant, halmos counterexample, fuzzing seed crash) goes
+undiscovered, and the "mandatory trigger" prose at the top of Phase 2
+is not self-enforcing.
+
+```bash
+if [ ! -f "$FUZZING_DIR/FUZZING.md" ]; then
+  echo "REFUSE: Phase 2 did not produce $FUZZING_DIR/FUZZING.md."
+  echo "Either run Phase 2 properly or write FUZZING.md documenting"
+  echo "why fuzzing was not applicable. The exemption MUST cite ALL"
+  echo "four conditions: no arithmetic beyond plain ERC20 transfer,"
+  echo "not a vault / AMM / lending / staking / oracle / restaking /"
+  echo "bridge integration, no state machine with >= 3 phases, no"
+  echo "quantitative bound in BOUNTY_MATRIX.md Critical lines."
+  exit 1
+fi
+```
+
+If the file exists but the table is empty (no rows), treat as failure
+unless the "Notes" section explicitly cites all four exemption
+conditions above. The orchestrator may NOT continue to Phase 3 on
+implicit skip.
+
 ## PHASE 3: Reconnaissance (re-read with adversarial eyes)
 
 `/gebug-brainstorm` already did light recon. Re-read with the adversarial
