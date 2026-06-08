@@ -753,9 +753,20 @@ templates including:
 
 ### Validation outcomes
 
-- **PASSING**: PoC compiles, runs, asserts profit. Candidate becomes a
-  finding in Phase 8. Capture full forge output as `console.txt` in the
-  POC folder.
+- **PASSING**: a Foundry test (`forge test`) that (a) compiles, (b) runs
+  against a pinned mainnet fork or equivalent reproducible state, AND
+  (c) contains at least one assertion that fails IFF the bug is absent
+  (profit > 0, invariant breached, victim balance went down, etc.).
+  Capture full forge output as `console.txt` in the POC folder.
+- **SURFACE_ONLY** (new): the "PoC" is only `cast` reads, storage
+  inspection, or static observations (e.g., "function is permissionless,
+  storage slot is empty") with NO executing assertion that demonstrates
+  the bug being triggered. These are NOT PASSING. They DO NOT pass the
+  validity gate and DO NOT become numbered findings. Route them to
+  `REPORT.md` § "Surfaces worth re-auditing later" with the read-only
+  evidence preserved. Common offenders: post-expiry rate-fix windows
+  where the IBT-rate manipulation itself was never modeled; permissionless
+  functions whose downstream impact was never traced to extraction.
 - **FAILED**: PoC compiles but the assertion fails OR the math
   derivation does not check out. Mark candidate INVALID in the working
   ledger. Document why under the candidate's notes.
@@ -763,16 +774,35 @@ templates including:
   rejection-only-with-proof). Record the rejection citation.
 
 **HARD RULE**: no MEDIUM+ finding ships in the final report without a
-PASSING PoC or verifiable local execution output. Otherwise downgrade to
-LOW / INFO.
+PASSING PoC (per the strict definition above). SURFACE_ONLY observations
+NEVER become numbered findings regardless of severity hypothesis  -
+they go in REPORT.md § Surfaces, never in `finding/*.md`. Otherwise
+downgrade FAILED candidates to LOW / INFO if there's enough evidence,
+or drop entirely.
 
-### Headline exploit
+### Headline exploit (conditional  - see SKILL.md Output Layout)
 
-After all per-finding PoCs, pick the single highest-impact PASSING PoC
-and copy / adapt it to `$EXPLOIT_DIR/Exploit.sol`. This is the "showcase"
-exploit. If there are no Criticals, the highest-severity PASSING PoC
-becomes the headline. If no PoC passed, leave `$EXPLOIT_DIR/` empty and
-note this in `REPORT.md`.
+`$EXPLOIT_DIR/Exploit.sol` is CONDITIONAL on at least one PASSING
+Critical or High finding. The three cases:
+
+1. **At least one Critical/High PoC PASSED**: pick the single
+   highest-impact PASSING PoC and copy / adapt it to
+   `$EXPLOIT_DIR/Exploit.sol`. The headline file MUST be a fresh
+   mainnet-fork test that exercises real state at the pinned block,
+   not a re-export of a Phase 2 unit test. Capture forge PASS output
+   in `console.txt` next to it.
+2. **Highest severity is Medium / Low / Info**: REMOVE the
+   `$EXPLOIT_DIR/` directory entirely (`rmdir "$EXPLOIT_DIR" 2>/dev/null`).
+   Note its intentional absence in `REPORT.md` § Executive summary:
+   "No headline exploit: highest severity is <X>; `exploit/` omitted
+   per Output Layout rules." Per-finding PoCs under `report/POC/`
+   remain  - they ARE the deliverable for Medium / Low / Info findings.
+3. **No PoC passed at all**: leave `$EXPLOIT_DIR/` empty AND note this
+   prominently in `REPORT.md`. This is rare; usually it means the
+   pipeline is incomplete (see Honest Negative Result in SKILL.md).
+
+The Phase 10 anti-hallucination check enforces this invariant (`exploit/
+Exploit.sol` exists IFF highest severity is Critical or High).
 
 ## PHASE 8: Write findings
 
@@ -806,6 +836,19 @@ the PoC's MEASURED outputs, not carried forward from the vuln-hunter's
    the candidate originally mapped to, REMAP to the highest line that
    the measured impact does meet. If no line matches, severity caps
    at LOW with `would_submit_to_bounty: no`.
+5. **No hand-waved monetary scale.** Any USD / token-amount claim in
+   the finding body ("$X at risk", "$Y holders exposed", "drains $Z
+   per epoch") MUST be backed by a `measured_attacker_pl_usd` or
+   `measured_victim_loss_usd` field with a concrete number derived from
+   the PoC run. If either field is `unknown`, `not modeled`, or `n/a`,
+   the finding MUST NOT contain quantified loss claims in prose.
+   Replace with qualitative language that names the unmodeled factor
+   ("potential exposure subject to <unmodeled IBT-rate manipulation
+   feasibility>") or remove the section. Numbers that exist only as
+   on-chain TVL reads without a feasibility check ("the pool holds $5M,
+   therefore $5M is at risk") are hallucinations  - the audit did not
+   demonstrate $5M of extractable value, only that $5M of value sits
+   nearby.
 
 The "do not pre-downgrade" rule in `SKILL.md` Severity Calibration
 applies to the WORK PHASE (before PoC). After PoC, evidence-based
@@ -842,6 +885,28 @@ do not soften without evidence; do harden / adjust with evidence.
 Honesty discipline: if K3 = 0, the executive summary MUST emphasize
 that as a positive defense-in-depth outcome. Do not inflate K3 by
 relaxing the gates.
+
+**Coverage honesty (required field in executive summary).** List the
+subsystems FULLY audited (code + PoCs), PARTIALLY audited (light read
+only, no fuzz / no PoC), and DEFERRED (source unavailable, scope cut,
+budget). If any DEFERRED subsystem sits on the bounty's user-fund flow
+(deposit / withdraw / settle / redeem / liquidate / claim), the executive
+summary MUST flag it with explicit language:
+
+> "Coverage incomplete for <subsystem> because <reason>; findings
+> below cover the audited surface only. <N> of <M> initial candidates
+> remain DEFERRED."
+
+Without this disclosure a headline like "3 findings" misleads readers
+who don't realize the core vault accounting was never analyzed. The
+disclosure protects auditor credibility and gives the bounty team the
+information they need to scope follow-up work.
+
+If headline severity is Medium / Low / Info, also add the line:
+"No headline exploit: highest severity is <X>; `exploit/` directory
+intentionally omitted per Output Layout rules." This pre-empts the
+question "why is `exploit/` empty?" and reinforces the conditional
+rule.
 
 ## Scope
 
@@ -933,7 +998,38 @@ done
 # If a hit cannot be quantified, the underlying finding is likely an
 # already-dead or trivial-precondition case - revisit Phase 6.5 verdict.
 
-# 4. Required files present
+# 5. Byte-perfect code blocks (new  - see SKILL.md Final Anti-Hallucination
+#    Check item 7). For every fenced code block in finding/*.md that
+#    carries a "// LXX-LYY" line-range comment, sed the actual range out
+#    of the source and diff against the displayed block (whitespace-
+#    tolerant). Blocks tagged "(paraphrased)" / "(excerpt, abridged)"
+#    are SKIPPED. Untagged mismatches MUST be fixed before shipping.
+python3 - <<'PY' "$FINDING_DIR" "$TARGET_REPO"
+import os, re, sys, pathlib
+finding_dir, target_repo = sys.argv[1], sys.argv[2]
+hits = 0
+for f in sorted(pathlib.Path(finding_dir).glob("*.md")):
+    text = f.read_text()
+    # Match fenced code blocks whose first inline-comment line is "// L<N>-L<M>"
+    for m in re.finditer(r"```(?:solidity)?\n(// L(\d+)(?:-L(\d+))?[^\n]*)\n(.*?)```",
+                          text, re.DOTALL):
+        header, lstart, lend, body = m.group(1), int(m.group(2)), \
+            int(m.group(3) or m.group(2)), m.group(4)
+        if "(paraphrased)" in header or "(excerpt" in header:
+            continue
+        # Extract source path from a nearby "Contract:" line above the block.
+        # Best-effort: skip if not found.
+        # NOTE: hooks into the convention used by references/finding-template.md.
+        # Implementers can replace with their own resolver.
+        # If mismatch found, emit a HALLUCINATION: line.
+        # ...
+        pass
+PY
+# (The full implementation is left to the orchestrator. The point is:
+#  Phase 10 MUST run a byte-equality check on every annotated code block.
+#  See SKILL.md Final Anti-Hallucination Check item 7 for the rule.)
+
+# 6. Required files present
 for required in \
   "$REPORT_DIR/REPORT.md" \
   "$REPORT_DIR/INVARIANTS.md" \
@@ -942,6 +1038,22 @@ for required in \
   "$FUZZING_DIR/FUZZING.md"; do
   test -f "$required" || echo "MISSING REQUIRED: $required"
 done
+
+# 7. exploit/Exploit.sol presence ↔ severity invariant
+#    The exploit/ directory is CONDITIONAL on at least one PASSING
+#    Critical/High finding. Enforce both directions:
+HIGHEST_SEV=$(ls "$FINDING_DIR" 2>/dev/null | sed 's/_.*//' | sort -u | head -1)
+if [ -f "$EXPLOIT_DIR/Exploit.sol" ]; then
+  case "$HIGHEST_SEV" in
+    CRITICAL|HIGH) : ;;
+    *) echo "VIOLATION: exploit/Exploit.sol exists but highest severity is $HIGHEST_SEV. Per SKILL.md Output Layout, exploit/ MUST be omitted for Medium/Low/Info headlines." ;;
+  esac
+fi
+if [ ! -f "$EXPLOIT_DIR/Exploit.sol" ]; then
+  case "$HIGHEST_SEV" in
+    CRITICAL|HIGH) echo "VIOLATION: highest severity is $HIGHEST_SEV but exploit/Exploit.sol is missing. Critical/High findings REQUIRE a headline exploit file." ;;
+  esac
+fi
 ```
 
 If any check fails, fix before closing.

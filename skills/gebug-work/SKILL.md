@@ -167,8 +167,12 @@ $AUDIT_DIR/
 │   ├── echidna.yaml                     if used
 │   └── halmos_*.out                     counter-examples
 │
-├── exploit/                             ← OUTPUT
-│   └── Exploit.sol                      headline exploit (fork-based)
+├── exploit/                             ← OUTPUT (CONDITIONAL  - see rules)
+│   └── Exploit.sol                      headline exploit; created ONLY when
+│                                        the audit has a PASSING Critical or
+│                                        High finding. Omit the directory
+│                                        entirely for Medium / Low / Info
+│                                        headlines.
 │
 └── report/                              ← OUTPUT
     ├── REPORT.md                        the headline audit report
@@ -191,10 +195,28 @@ Mandatory rules:
 - Every per-finding PoC lives at `report/POC/<finding-slug>/Exploit.t.sol`
   with a sibling `reproduce.sh` that runs it via
   `forge test --match-path ...`.
-- `exploit/Exploit.sol` is the single "headline" exploit when the audit
-  has a primary critical finding. If multiple Criticals exist, pick the
+- `exploit/Exploit.sol` is the single "headline" fork PoC. CREATE IT ONLY
+  if the audit produced at least one PASSING Critical or High finding.
+  For audits whose highest severity is Medium / Low / Info, OMIT the
+  `exploit/` directory entirely and note its intentional absence in
+  `REPORT.md` § Executive summary ("No headline exploit: highest
+  severity is <X>"). A headline file MUST be a fresh mainnet-fork test
+  that exercises real state at the pinned block  - never a
+  copy / re-export of a Phase 2 unit test from `fuzzing/` or
+  `etherscan/<...>/test/`. If multiple Criticals exist, pick the
   highest-impact one for `exploit/`. All Criticals also have per-finding
   PoCs under `report/POC/`.
+- **Foundry scaffolding discipline**. Before creating a fresh
+  `<TARGET_REPO>/audit-pocs/` (or similar `src` + `test` workspace) plus
+  a root `foundry.toml` that points at it, check whether the
+  Etherscan-source bundle (`etherscan/<contract>/sources/`) ALREADY
+  contains a usable `test/` directory with its own `foundry.toml` and
+  remappings. If yes, run PoCs IN-PLACE there (reusing existing
+  remappings) instead of creating an empty stub like
+  `audit-pocs/src/Marker.sol` that the actual PoCs never import. A
+  root `foundry.toml` pointing at a near-empty `audit-pocs/` while the
+  real tests live elsewhere is dead scaffolding; either populate
+  `audit-pocs/test/` with the actual PoC files, or skip creating it.
 - Never mix multiple targets in one `gebug-audit/` directory.
 - The skill auto-generates `$AUDIT_DIR/.gitignore` that skips `_scratch/`,
   `_preflight/`, `fout/`, `cache/`, `*.log`. In Scenario B this prevents
@@ -329,6 +351,21 @@ carry only a `severity_hypothesis`.
   Address each in the finding write-up. Do NOT auto-reject because "2+
   reasons exist" - provide the counter-argument and let the triager
   decide.
+- **G. Off-chain-only ceiling rule**. If the finding's
+  `single_strongest_reject` (or its body) cites "no on-chain consumer",
+  "no consumer found", "subgraph-only", "off-chain only", "subgraph /
+  UI / monitoring", or equivalent language indicating impact does NOT
+  reach on-chain fund flow, the severity ceiling is LOW. Medium is
+  reserved for cases where the matrix line explicitly carves out
+  registry / metadata pollution AND the protocol's own integrators
+  reach the polluted state through a documented on-chain call you can
+  cite. "Subgraph might pick this up" is not a qualifying consumer; a
+  speculative future consumer is not a qualifying consumer; the
+  attacker's own off-chain bot is not a qualifying consumer. Ship Low
+  with the upgrade-path documented ("would become High if consumer X
+  starts reading"). Shipping Medium for off-chain-only findings burns
+  credibility on the rest of the report - triagers downgrade them
+  reliably and discount the auditor's calibration.
 
 Conservative-bias correction (pre-PoC): write the finding, build the
 PoC, apply the matrix AS WRITTEN by the bounty. The triager downgrades;
@@ -398,6 +435,26 @@ Before sending the report:
    the test (smoke-run it once if possible).
 6. State `all cites verified` in the closing summary, or list exactly
    what could not be verified and why.
+7. **Byte-perfect code blocks.** For every fenced code block inside
+   `finding/*.md` that carries a `// LXX-LYY` (or `// L<N>`) line-range
+   comment, grep that exact range from the cited source file and confirm
+   the displayed code matches the source byte-for-byte (modulo
+   whitespace and added review-comments which MUST be on their own
+   trailing lines, never altering source tokens). Two failure modes
+   to catch:
+   (a) Renamed identifiers (e.g., finding shows `newPTRate, newIBTRate`
+       while source uses `_ptRate, _ibtRate`)  - this is a hallucination,
+       even if the surrounding analysis stays correct.
+   (b) Reordered arguments (e.g., finding shows
+       `emit RatesStoredAtExpiry(ptRate, ibtRate)` while source emits
+       `(_ibtRate, _ptRate)`)  - also hallucination, even if the
+       structural claim is intact.
+   If a block is genuinely paraphrased for clarity (e.g., showing only
+   the relevant branch of a long function), label it explicitly with
+   `(paraphrased)` or `(excerpt, abridged)` AFTER the line-range comment
+   so reviewers know not to grep-match it. Paraphrased code without a
+   label is a hallucination; either restore the verbatim source or add
+   the label.
 
 ## Closing Message
 
@@ -408,10 +465,11 @@ Audit complete.
 
 Findings: <N> (Critical: <c>, High: <h>, Medium: <m>, Low: <l>, Info: <i>)
 Submittable (confidence >= 60, no gate failures): <K>
+Coverage: <fully-audited subsystems> / <deferred subsystems with reason>
 
 Report:    $AUDIT_DIR/report/REPORT.md
 Findings:  $AUDIT_DIR/finding/
-Headline exploit: $AUDIT_DIR/exploit/Exploit.sol
+Headline exploit: $AUDIT_DIR/exploit/Exploit.sol   (only if Critical/High present; otherwise OMIT this line)
 Per-finding PoCs: $AUDIT_DIR/report/POC/
 
 (Print resolved absolute paths verbatim; $AUDIT_DIR depends on Scenario A vs B from Phase 0.)
